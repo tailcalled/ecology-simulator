@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned nightly: build-std + wasm atomics are sensitive to nightly churn.
+# This is the nightly already installed on this machine (rustc 1.97.0-nightly).
+channel = "nightly-2026-05-02"
+components = ["rust-src"]
+targets = ["wasm32-unknown-unknown"]

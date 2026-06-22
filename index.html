@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ecology Simulator</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d12;
+      color: #cfd6e4; font: 13px/1.4 system-ui, sans-serif; }
+    #app { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    #status { padding: 6px 10px; background: #11151d; border-bottom: 1px solid #1d2430;
+      font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 10px;
+      flex: 0 0 auto; }
+    button { background: #1b2230; color: #cfd6e4; border: 1px solid #2a3342; border-radius: 4px;
+      padding: 3px 10px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    #views { flex: 1 1 auto; display: flex; min-height: 0; overflow: hidden; }
+    .view { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+      overflow: hidden; border-right: 1px solid #1d2430; }
+    .view:last-child { border-right: none; }
+    .view header { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+      background: #0e1219; border-bottom: 1px solid #1d2430; flex: 0 0 auto; }
+    .view header .title { font-weight: 600; color: #9fb0cc; }
+    .view header .hint { color: #5b6680; font-size: 12px; }
+    .view header .spacer { flex: 1; }
+    .view canvas { flex: 1 1 auto; min-height: 0; width: 100%; display: block; }
+
+    /* "Layers" dropdown built on <details> */
+    .layers { position: relative; }
+    .layers > summary { list-style: none; cursor: pointer; user-select: none;
+      background: #161b25; border: 1px solid #2a3342; border-radius: 4px; padding: 2px 8px; }
+    .layers > summary::-webkit-details-marker { display: none; }
+    .layers[open] > summary { border-color: #3a82f6; }
+    .layers .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 10;
+      background: #11151d; border: 1px solid #2a3342; border-radius: 6px; padding: 6px;
+      min-width: 170px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45); }
+    .layers .menu label { display: flex; align-items: center; gap: 7px; padding: 4px 4px;
+      color: #cfd6e4; cursor: pointer; white-space: nowrap; }
+    .layers .menu .sep { margin: 4px 4px; color: #5b6680; font-size: 11px;
+      text-transform: uppercase; letter-spacing: 0.04em; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="status">
+      <button id="pause" type="button" disabled>⏸ Pause</button>
+      <span id="statusText">initializing…</span>
+    </div>
+    <div id="views">
+      <section class="view">
+        <header>
+          <span class="title">Planet</span>
+          <span class="spacer"></span>
+          <details class="layers">
+            <summary>Layers ▾</summary>
+            <div class="menu">
+              <div class="sep">Layer</div>
+              <label><input type="radio" name="layer0" class="layer" data-view="0" value="temperature" checked /> Temperature</label>
+              <div class="sep">Overlays</div>
+              <label><input type="checkbox" class="ov" data-view="0" data-ov="sunlight" checked /> Sunlight</label>
+              <label><input type="checkbox" class="ov" data-view="0" data-ov="graticule" checked /> Lat/long lines</label>
+            </div>
+          </details>
+        </header>
+        <canvas id="globe"></canvas>
+      </section>
+      <section class="view">
+        <header>
+          <span class="title">Zoomed</span>
+          <span class="hint">— arrow keys to move</span>
+          <span class="spacer"></span>
+          <details class="layers">
+            <summary>Layers ▾</summary>
+            <div class="menu">
+              <div class="sep">Layer</div>
+              <label><input type="radio" name="layer1" class="layer" data-view="1" value="temperature" checked /> Temperature</label>
+              <div class="sep">Overlays</div>
+              <label><input type="checkbox" class="ov" data-view="1" data-ov="sunlight" checked /> Sunlight</label>
+              <label><input type="checkbox" class="ov" data-view="1" data-ov="graticule" checked /> Lat/long lines</label>
+            </div>
+          </details>
+        </header>
+        <canvas id="zoom"></canvas>
+      </section>
+    </div>
+  </div>
+  <script type="module" src="./web/main.js"></script>
+</body>
+</html>

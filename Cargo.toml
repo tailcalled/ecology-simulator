@@ -1,0 +1,47 @@
+[package]
+name = "ecology-simulator"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# --- Cross-platform deps (compile on host for `cargo test` of grid/sim) ---
+[dependencies]
+glam = { version = "0.30", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+rayon = "1"
+log = "0.4"
+getrandom = "0.3"
+d3_geo_voronoi_rs = "0.10"
+geo-types = "0.7"
+
+# --- wasm-only deps (kept off host builds so `cargo test` stays lean) ---
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-rayon = "1.3"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+console_log = "1"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wgpu = "29"
+web-sys = { version = "0.3", features = [
+  "OffscreenCanvas",
+  "Worker",
+  "DedicatedWorkerGlobalScope",
+  "HtmlCanvasElement",
+  "Window",
+  "Document",
+  "Navigator",
+  "WorkerNavigator",
+  "DomRect",
+] }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+# Voronoi precompute is heavy in debug; optimize deps even in dev builds.
+[profile.dev.package."*"]
+opt-level = 2
