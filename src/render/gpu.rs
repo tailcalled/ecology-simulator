@@ -13,14 +13,15 @@ use web_sys::OffscreenCanvas;
 use super::mesh::Vertex;
 use super::Layer;
 
-/// Per-view camera/overlay uniform (std140: mat4 + 3·vec4 = 112 bytes).
+/// Per-view camera/overlay uniform (std140: mat4 + 4·vec4 = 128 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CameraUniform {
     view_proj: [f32; 16],
     eye: [f32; 4],
     sun: [f32; 4],
-    params: [f32; 4], // x = data min, y = data max, z = show sunlight, w = show graticule
+    params: [f32; 4],    // x = data min, y = data max, z = show sunlight, w = show graticule
+    highlight: [f32; 4], // x = hovered cell index, or -1 for none
 }
 
 /// What the engine supplies per view each frame.
@@ -39,6 +40,8 @@ struct View {
     layer: Layer,
     show_sunlight: bool,
     show_graticule: bool,
+    /// Cell highlighted by the cursor hovering this view, if any.
+    highlight: Option<u32>,
 }
 
 pub struct Renderer {
@@ -380,6 +383,7 @@ impl Renderer {
                 layer: default_layers[i],
                 show_sunlight: true,
                 show_graticule: true,
+                highlight: None,
             });
         }
 
@@ -426,6 +430,13 @@ impl Renderer {
         }
     }
 
+    /// Set (or clear) the cell highlighted by the cursor hovering a view.
+    pub fn set_highlight(&mut self, view: usize, cell: Option<u32>) {
+        if let Some(v) = self.views.get_mut(view) {
+            v.highlight = cell;
+        }
+    }
+
     /// Upload the zoom-footprint outline (world positions) drawn on the globe view.
     pub fn set_marker(&mut self, points: &[Vec3]) {
         let n = points.len().min(self.marker_capacity as usize);
@@ -463,6 +474,7 @@ impl Renderer {
                     if v.show_sunlight { 1.0 } else { 0.0 },
                     if v.show_graticule { 1.0 } else { 0.0 },
                 ],
+                highlight: [v.highlight.map_or(-1.0, |c| c as f32), 0.0, 0.0, 0.0],
             };
             self.queue
                 .write_buffer(&v.camera_buf, 0, bytemuck::bytes_of(&uniform));

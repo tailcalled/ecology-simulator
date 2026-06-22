@@ -43,16 +43,25 @@ pub struct Climate {
 impl Default for Climate {
     fn default() -> Self {
         Self {
+            // Earth's solar constant (total solar irradiance at 1 AU), W·m⁻².
             solar_constant: 1361.0,
+            // Earth's mean Bond albedo (dimensionless).
             albedo: 0.3,
-            emissivity: 1.0,
+            // Effective emissivity < 1 to crudely stand in for greenhouse warming: it lifts the
+            // global-mean radiative equilibrium from the bare-rock 255 K up to Earth's ~288 K
+            // (εσT⁴ = S(1−α)/4 ⇒ T ≈ 288 K). Dimensionless.
+            emissivity: 0.61,
             // ~0.75-day thermal time constant: strong, clearly visible diurnal swing with a
-            // realistic afternoon-warm / pre-dawn-cold lag.
+            // realistic afternoon-warm / pre-dawn-cold lag. Areal heat capacity, J·m⁻²·K⁻¹.
             heat_capacity: 4.0e5,
+            // Lateral heat-conduction coefficient, W·m⁻²·K⁻¹ per unit conductance.
             diffusivity: 25.0,
+            // Earth's axial tilt, radians.
             obliquity: 23.44_f32.to_radians(),
+            // Earth's solar day, seconds.
             day_seconds: 86_400.0,
-            year_seconds: 86_400.0 * 365.0,
+            // Earth's year (365.25 days), seconds.
+            year_seconds: 86_400.0 * 365.25,
         }
     }
 }

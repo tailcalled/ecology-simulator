@@ -8,6 +8,7 @@ struct Camera {
     eye: vec4<f32>,      // world-space camera position (xyz)
     sun: vec4<f32>,      // direction to the sun in the planet frame (xyz)
     params: vec4<f32>,   // x = data min, y = data max, z = show sunlight, w = show graticule
+    highlight: vec4<f32>,// x = hovered cell index, or -1 for none
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -18,6 +19,7 @@ struct VsOut {
     @location(0) @interpolate(flat) value: f32,
     @location(1) world: vec3<f32>,
     @location(2) normal: vec3<f32>,
+    @location(3) @interpolate(flat) cell: u32,
 };
 
 @vertex
@@ -27,6 +29,7 @@ fn vs_main(@location(0) pos: vec3<f32>, @location(1) cell: u32) -> VsOut {
     out.value = cell_data[cell];
     out.world = pos;
     out.normal = normalize(pos);
+    out.cell = cell;
     return out;
 }
 
@@ -82,6 +85,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let lon = degrees(atan2(n.y, n.x));
         let line = max(grid_line(lat, 15.0), grid_line(lon, 15.0));
         color = mix(color, vec3<f32>(0.92, 0.94, 1.0), line * 0.7);
+    }
+
+    // Highlight the cell under the cursor: brighten and tint toward white.
+    if (camera.highlight.x >= 0.0 && in.cell == u32(camera.highlight.x)) {
+        color = mix(color, vec3<f32>(1.0, 1.0, 1.0), 0.4) * 1.25;
     }
 
     return vec4<f32>(color, 1.0);

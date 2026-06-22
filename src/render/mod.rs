@@ -4,6 +4,7 @@
 
 pub mod camera;
 pub mod mesh;
+pub mod pick;
 
 #[cfg(target_arch = "wasm32")]
 mod gpu;

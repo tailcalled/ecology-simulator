@@ -3,7 +3,9 @@
 // All GPU + simulation work happens inside the worker (see web/worker.js).
 
 const statusEl = document.getElementById('statusText');
-const pauseBtn = document.getElementById('pause');
+const speedSlider = document.getElementById('speedSlider');
+const speedLabel = document.getElementById('speedLabel');
+const tooltipEl = document.getElementById('tooltip');
 const setStatus = (msg) => { statusEl.textContent = msg; };
 
 if (!crossOriginIsolated) {
@@ -44,12 +46,14 @@ worker.onmessage = (e) => {
   } else if (msg.type === 'ready') {
     setStatus(msg.text);
     running = true;
-    pauseBtn.disabled = false;
+    speedSlider.disabled = false;
     lastT = performance.now();
     requestAnimationFrame(loop);
   } else if (msg.type === 'frame') {
     // Worker finished a frame: schedule the next (natural backpressure).
     if (running) requestAnimationFrame(loop);
+  } else if (msg.type === 'hoverInfo') {
+    updateTooltip(msg.info);
   } else if (msg.type === 'error') {
     setStatus('error: ' + msg.text);
     running = false;
@@ -76,6 +80,12 @@ function loop(t) {
     worker.postMessage({ type: 'pan', dEast: dE * s, dNorth: dN * s });
   }
 
+  // Coalesce cursor moves to at most one pick request per frame.
+  if (pendingHover) {
+    worker.postMessage(pendingHover);
+    pendingHover = null;
+  }
+
   worker.postMessage({ type: 'tick', dt: dtMs });
 }
 
@@ -84,13 +94,23 @@ worker.postMessage(
   offscreens,
 );
 
-// Pause / resume the simulation clock (rendering + auto-rotation continue).
-let paused = false;
-pauseBtn.addEventListener('click', () => {
-  paused = !paused;
-  pauseBtn.textContent = paused ? '▶ Resume' : '⏸ Pause';
-  worker.postMessage({ type: 'pause', paused });
-});
+// Simulation speed: an almost-logarithmic ladder of fast-forward factors (sim seconds per real
+// second). The two lowest rungs are special-cased — 0 fully pauses, 1 is real time — and the
+// rest climb a 1-2-5 decade ladder. The slider's min/max in the HTML must match this length.
+const SPEEDS = [0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000];
+
+function speedText(s) {
+  if (s === 0) return 'Paused';
+  if (s === 1) return 'Real-time';
+  return `${s.toLocaleString()}×`;
+}
+
+function applySpeed() {
+  const scale = SPEEDS[Number(speedSlider.value)];
+  speedLabel.textContent = speedText(scale);
+  worker.postMessage({ type: 'speed', scale });
+}
+speedSlider.addEventListener('input', applySpeed);
 
 // Forward base-layer selection (radio buttons) per view.
 for (const r of document.querySelectorAll('input.layer')) {
@@ -112,6 +132,53 @@ for (const cb of document.querySelectorAll('input.ov')) {
     });
   });
 }
+
+// --- Cursor hover (highlight + details box) and click-to-recenter ---
+// The latest cursor pick, sent to the worker once per frame in loop(); the worker replies with
+// 'hoverInfo' carrying the cell details (or null if the ray missed the planet).
+let pendingHover = null;
+
+// Convert a pointer event over `el` to normalized device coords (x, y in [-1, 1], y up).
+function eventToNdc(el, e) {
+  const r = el.getBoundingClientRect();
+  return [
+    ((e.clientX - r.left) / r.width) * 2 - 1,
+    1 - ((e.clientY - r.top) / r.height) * 2,
+  ];
+}
+
+function updateTooltip(info) {
+  if (!info) {
+    tooltipEl.style.display = 'none';
+    return;
+  }
+  const c = (info.temp - 273.15).toFixed(1);
+  tooltipEl.innerHTML =
+    `<div class="temp">${info.temp.toFixed(1)} K · ${c} °C</div>` +
+    `<div class="coord">${info.lat.toFixed(1)}°, ${info.lon.toFixed(1)}°</div>`;
+  tooltipEl.style.display = 'block';
+}
+
+canvasEls.forEach((el, view) => {
+  el.addEventListener('mousemove', (e) => {
+    const [ndcX, ndcY] = eventToNdc(el, e);
+    pendingHover = { type: 'hover', view, ndcX, ndcY };
+    // Position the box at the cursor immediately so it tracks smoothly.
+    tooltipEl.style.left = `${e.clientX + 14}px`;
+    tooltipEl.style.top = `${e.clientY + 14}px`;
+  });
+  el.addEventListener('mouseleave', () => {
+    pendingHover = null;
+    tooltipEl.style.display = 'none';
+    worker.postMessage({ type: 'clearHover', view });
+  });
+});
+
+// Clicking the planet view recenters the zoomed view on that spot.
+canvasEls[0].addEventListener('click', (e) => {
+  const [ndcX, ndcY] = eventToNdc(canvasEls[0], e);
+  worker.postMessage({ type: 'clickMove', ndcX, ndcY });
+});
 
 // Track held arrow keys; the actual panning is applied continuously in loop().
 const PAN_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);

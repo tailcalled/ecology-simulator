@@ -158,6 +158,23 @@ impl Grid {
     pub fn neighbor_weights(&self, i: usize) -> &[f32] {
         &self.adj_weight[self.adj_start[i] as usize..self.adj_start[i + 1] as usize]
     }
+
+    /// Index of the cell whose center is closest (greatest angular proximity) to `dir`.
+    /// `dir` need not be normalized. Brute-force argmax over the cell centers — cheap enough
+    /// for interactive picking at this cell count.
+    pub fn nearest_cell(&self, dir: Vec3) -> usize {
+        let d = dir.normalize_or_zero();
+        let mut best = 0;
+        let mut best_dot = f32::NEG_INFINITY;
+        for (i, c) in self.centers.iter().enumerate() {
+            let dot = c.dot(d);
+            if dot > best_dot {
+                best_dot = dot;
+                best = i;
+            }
+        }
+        best
+    }
 }
 
 #[cfg(test)]

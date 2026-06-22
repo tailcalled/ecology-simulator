@@ -16,6 +16,13 @@
     button { background: #1b2230; color: #cfd6e4; border: 1px solid #2a3342; border-radius: 4px;
       padding: 3px 10px; cursor: pointer; }
     button:disabled { opacity: 0.5; cursor: default; }
+
+    /* Simulation speed control */
+    #speed { display: flex; align-items: center; gap: 8px; }
+    #speed input[type=range] { width: 160px; accent-color: #3a82f6; cursor: pointer; }
+    #speed input[type=range]:disabled { opacity: 0.5; cursor: default; }
+    #speedLabel { min-width: 92px; color: #9fb0cc; font-weight: 600; }
+    #speed .cap { color: #5b6680; }
     #views { flex: 1 1 auto; display: flex; min-height: 0; overflow: hidden; }
     .view { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
       overflow: hidden; border-right: 1px solid #1d2430; }
@@ -40,12 +47,24 @@
       color: #cfd6e4; cursor: pointer; white-space: nowrap; }
     .layers .menu .sep { margin: 4px 4px; color: #5b6680; font-size: 11px;
       text-transform: uppercase; letter-spacing: 0.04em; }
+
+    /* Cursor hover details box */
+    #tooltip { position: fixed; z-index: 50; pointer-events: none; display: none;
+      background: rgba(14, 18, 25, 0.92); border: 1px solid #2a3342; border-radius: 5px;
+      padding: 5px 8px; color: #e3e9f4; font-variant-numeric: tabular-nums;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5); white-space: nowrap; }
+    #tooltip .temp { font-weight: 600; }
+    #tooltip .coord { color: #8a97b0; font-size: 11px; margin-top: 2px; }
   </style>
 </head>
 <body>
   <div id="app">
     <div id="status">
-      <button id="pause" type="button" disabled>⏸ Pause</button>
+      <label id="speed" title="Simulation speed">
+        <span class="cap">Speed</span>
+        <input id="speedSlider" type="range" min="0" max="16" step="1" value="12" disabled />
+        <span id="speedLabel">5000×</span>
+      </label>
       <span id="statusText">initializing…</span>
     </div>
     <div id="views">
@@ -86,6 +105,7 @@
       </section>
     </div>
   </div>
+  <div id="tooltip"></div>
   <script type="module" src="./web/main.js"></script>
 </body>
 </html>

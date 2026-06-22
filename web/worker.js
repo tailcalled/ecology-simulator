@@ -10,7 +10,10 @@ import init, {
   engine_set_layer,
   engine_set_overlay,
   engine_pan_zoom,
-  engine_set_paused,
+  engine_set_time_scale,
+  engine_hover,
+  engine_clear_hover,
+  engine_click_move,
 } from '../pkg/ecology_simulator.js';
 
 let initialized = false;
@@ -58,8 +61,26 @@ self.onmessage = async (e) => {
       case 'pan':
         if (initialized) engine_pan_zoom(msg.dEast, msg.dNorth);
         break;
-      case 'pause':
-        if (initialized) engine_set_paused(msg.paused);
+      case 'speed':
+        if (initialized) engine_set_time_scale(msg.scale);
+        break;
+      case 'hover':
+        if (initialized) {
+          const info = engine_hover(msg.view, msg.ndcX, msg.ndcY);
+          // Marshal the wasm struct into a plain object, then free it.
+          let plain = null;
+          if (info) {
+            plain = { cell: info.cell, temp: info.temp, lon: info.lon, lat: info.lat };
+            info.free();
+          }
+          post('hoverInfo', { view: msg.view, info: plain });
+        }
+        break;
+      case 'clearHover':
+        if (initialized) engine_clear_hover(msg.view);
+        break;
+      case 'clickMove':
+        if (initialized) engine_click_move(msg.ndcX, msg.ndcY);
         break;
     }
   } catch (err) {
