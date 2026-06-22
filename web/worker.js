@@ -70,7 +70,7 @@ self.onmessage = async (e) => {
           // Marshal the wasm struct into a plain object, then free it.
           let plain = null;
           if (info) {
-            plain = { cell: info.cell, temp: info.temp, lon: info.lon, lat: info.lat };
+            plain = { cell: info.cell, temp: info.temp, lon: info.lon, lat: info.lat, plate: info.plate };
             info.free();
           }
           post('hoverInfo', { view: msg.view, info: plain });

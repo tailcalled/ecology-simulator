@@ -25,7 +25,7 @@ mod wasm {
 
     use crate::grid::Grid;
     use crate::render::camera::{OrbitCamera, SurfaceCamera};
-    use crate::render::mesh::build_mesh;
+    use crate::render::mesh::{build_arrows, build_mesh};
     use crate::render::pick::ray_sphere;
     use crate::render::{Layer, Renderer, ViewCamera};
     use crate::sim::{Climate, Sim};
@@ -46,6 +46,12 @@ mod wasm {
     const AUTO_ROTATE: f32 = 0.08;
     /// Starting temperature for every cell — Earth's mean surface temperature (K).
     const INITIAL_TEMP: f32 = 288.0;
+    /// Number of continental plates the terrain generator carves the planet into.
+    const NUM_PLATES: usize = 12;
+    /// Seed for deterministic plate generation.
+    const PLATE_SEED: u64 = 0xC0FFEE;
+    /// Roughly how many cells to sample for the plate-motion arrow field.
+    const ARROW_SAMPLES: usize = 600;
 
     /// The whole engine: grid + simulation + renderer + the two cameras. Lives in a worker
     /// thread-local because the renderer's GPU objects cannot cross threads.
@@ -87,10 +93,16 @@ mod wasm {
         let mesh = build_mesh(&grid);
         log::info!("engine_init: mesh has {} vertices", mesh.len());
 
-        let sim = Sim::new(grid.n, Climate::default(), INITIAL_TEMP);
-        let renderer = Renderer::new(canvas0, canvas1, &mesh, grid.n)
+        let mut sim = Sim::new(grid.n, Climate::default(), INITIAL_TEMP);
+        sim.generate_terrain(&grid, NUM_PLATES, PLATE_SEED);
+        log::info!("engine_init: {} plates generated", sim.terrain.plates.len());
+        let arrows = build_arrows(&grid, &sim.terrain.velocity, ARROW_SAMPLES);
+
+        let mut renderer = Renderer::new(canvas0, canvas1, &mesh, grid.n)
             .await
             .map_err(|e| JsValue::from_str(&e))?;
+        renderer.upload_plate_data(&sim.terrain.plate_id);
+        renderer.set_arrows(&arrows);
 
         ENGINE.with(|cell| {
             *cell.borrow_mut() = Some(Engine {
@@ -156,6 +168,7 @@ mod wasm {
         pub temp: f32,
         pub lon: f32,
         pub lat: f32,
+        pub plate: u32,
     }
 
     /// Camera (view-projection + eye) for a view index: 0 = globe, 1 = zoomed.
@@ -182,11 +195,13 @@ mod wasm {
                     let idx = engine.grid.nearest_cell(hit);
                     engine.renderer.set_highlight(view, Some(idx as u32));
                     let ll = engine.grid.lonlat_deg[idx];
+                    let plate = engine.sim.terrain.plate_id.get(idx).copied().unwrap_or(0);
                     Some(PickInfo {
                         cell: idx as u32,
                         temp: engine.sim.temperatures()[idx],
                         lon: ll.x,
                         lat: ll.y,
+                        plate,
                     })
                 }
                 None => {

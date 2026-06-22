@@ -155,7 +155,7 @@ function updateTooltip(info) {
   const c = (info.temp - 273.15).toFixed(1);
   tooltipEl.innerHTML =
     `<div class="temp">${info.temp.toFixed(1)} K · ${c} °C</div>` +
-    `<div class="coord">${info.lat.toFixed(1)}°, ${info.lon.toFixed(1)}°</div>`;
+    `<div class="coord">Plate ${info.plate} · ${info.lat.toFixed(1)}°, ${info.lon.toFixed(1)}°</div>`;
   tooltipEl.style.display = 'block';
 }
 

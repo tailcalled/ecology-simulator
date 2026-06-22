@@ -40,6 +40,7 @@ struct View {
     layer: Layer,
     show_sunlight: bool,
     show_graticule: bool,
+    show_motion: bool,
     /// Cell highlighted by the cursor hovering this view, if any.
     highlight: Option<u32>,
 }
@@ -55,15 +56,25 @@ pub struct Renderer {
     vertex_count: u32,
     cell_buf: wgpu::Buffer,
     cell_bind_group: wgpu::BindGroup,
+    /// Per-cell plate id (static after terrain generation); colored via the plate palette.
+    plate_buf: wgpu::Buffer,
+    plate_bind_group: wgpu::BindGroup,
     marker_pipeline: wgpu::RenderPipeline,
     marker_buf: wgpu::Buffer,
     marker_capacity: u32,
     marker_count: u32,
+    /// Plate-motion arrow field (line list), shared across views, toggled per view.
+    arrow_pipeline: wgpu::RenderPipeline,
+    arrow_buf: wgpu::Buffer,
+    arrow_capacity: u32,
+    arrow_count: u32,
     views: Vec<View>,
 }
 
 /// Max vertices in the zoom-footprint outline line strip.
 const MARKER_CAPACITY: u32 = 64;
+/// Max vertices in the plate-motion arrow line list (6 per arrow → ~680 arrows).
+const ARROW_CAPACITY: u32 = 4096;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Background (space) clear color.
@@ -195,18 +206,23 @@ impl Renderer {
                 count: None,
             }],
         });
+        let storage_bgl_entry = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
         let cell_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cell-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
+            entries: &[storage_bgl_entry],
+        });
+        let plate_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("plate-bgl"),
+            entries: &[storage_bgl_entry],
         });
 
         // --- Shared geometry + per-cell data ---
@@ -229,6 +245,22 @@ impl Renderer {
                 resource: cell_buf.as_entire_binding(),
             }],
         });
+        // Per-cell plate id (one u32 each). Uploaded once after terrain generation; zero-filled
+        // until then so the buffer is always bound and the pipeline is valid.
+        let plate_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("plate-data"),
+            size: (n_cells.max(1) * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let plate_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("plate-bg"),
+            layout: &plate_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: plate_buf.as_entire_binding(),
+            }],
+        });
 
         // --- Pipeline ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -237,7 +269,7 @@ impl Renderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline-layout"),
-            bind_group_layouts: &[Some(&camera_bgl), Some(&cell_bgl)],
+            bind_group_layouts: &[Some(&camera_bgl), Some(&cell_bgl), Some(&plate_bgl)],
             immediate_size: 0,
         });
         let vertex_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32];
@@ -342,6 +374,59 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- Arrow pipeline (plate-motion field; line list, same pos-only vertex + camera-only
+        // bind group as the marker, but its own fragment color and topology). ---
+        let arrow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("arrow-pipeline"),
+            layout: Some(&marker_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_marker"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: (3 * std::mem::size_of::<f32>()) as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &marker_attrs,
+                }],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                // Depth-tested (the sphere occludes far-side arrows) but doesn't write depth.
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_arrow"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let arrow_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("arrow-verts"),
+            size: (ARROW_CAPACITY as usize * 3 * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // --- Per-view resources ---
         let default_layers = [Layer::Temperature, Layer::Temperature];
         let mut views = Vec::with_capacity(2);
@@ -383,6 +468,7 @@ impl Renderer {
                 layer: default_layers[i],
                 show_sunlight: true,
                 show_graticule: true,
+                show_motion: false,
                 highlight: None,
             });
         }
@@ -396,10 +482,16 @@ impl Renderer {
             vertex_count: mesh.len() as u32,
             cell_buf,
             cell_bind_group,
+            plate_buf,
+            plate_bind_group,
             marker_pipeline,
             marker_buf,
             marker_capacity: MARKER_CAPACITY,
             marker_count: 0,
+            arrow_pipeline,
+            arrow_buf,
+            arrow_capacity: ARROW_CAPACITY,
+            arrow_count: 0,
             views,
         })
     }
@@ -425,6 +517,7 @@ impl Renderer {
             match which {
                 "sunlight" => v.show_sunlight = enabled,
                 "graticule" => v.show_graticule = enabled,
+                "motion" => v.show_motion = enabled,
                 _ => {}
             }
         }
@@ -444,6 +537,22 @@ impl Renderer {
         self.queue
             .write_buffer(&self.marker_buf, 0, bytemuck::cast_slice(&flat));
         self.marker_count = n as u32;
+    }
+
+    /// Upload the per-cell plate ids (static after terrain generation), read by the plate layer.
+    pub fn upload_plate_data(&self, ids: &[u32]) {
+        self.queue
+            .write_buffer(&self.plate_buf, 0, bytemuck::cast_slice(ids));
+    }
+
+    /// Upload the plate-motion arrow field (line-list world positions). Static after generation;
+    /// drawn per view when the motion overlay is on.
+    pub fn set_arrows(&mut self, points: &[Vec3]) {
+        let n = points.len().min(self.arrow_capacity as usize);
+        let flat: Vec<f32> = points[..n].iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+        self.queue
+            .write_buffer(&self.arrow_buf, 0, bytemuck::cast_slice(&flat));
+        self.arrow_count = n as u32;
     }
 
     pub fn aspect(&self, view: usize) -> f32 {
@@ -474,7 +583,12 @@ impl Renderer {
                     if v.show_sunlight { 1.0 } else { 0.0 },
                     if v.show_graticule { 1.0 } else { 0.0 },
                 ],
-                highlight: [v.highlight.map_or(-1.0, |c| c as f32), 0.0, 0.0, 0.0],
+                highlight: [
+                    v.highlight.map_or(-1.0, |c| c as f32),
+                    v.layer.index() as f32,
+                    0.0,
+                    0.0,
+                ],
             };
             self.queue
                 .write_buffer(&v.camera_buf, 0, bytemuck::bytes_of(&uniform));
@@ -522,8 +636,17 @@ impl Renderer {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &v.camera_bind_group, &[]);
                 pass.set_bind_group(1, &self.cell_bind_group, &[]);
+                pass.set_bind_group(2, &self.plate_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
                 pass.draw(0..self.vertex_count, 0..1);
+
+                // Plate-motion arrows, drawn on any view with the motion overlay enabled.
+                if v.show_motion && self.arrow_count > 1 {
+                    pass.set_pipeline(&self.arrow_pipeline);
+                    pass.set_bind_group(0, &v.camera_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.arrow_buf.slice(..));
+                    pass.draw(0..self.arrow_count, 0..1);
+                }
 
                 // The zoom-footprint outline is drawn only on the globe view (index 0).
                 if i == 0 && self.marker_count > 1 {

@@ -10,10 +10,12 @@
 //! scratch buffer (double buffering), so neighbor reads never race writes.
 
 mod temperature;
+pub mod terrain;
 
 use glam::Vec3;
 
 use crate::grid::Grid;
+use terrain::Terrain;
 
 /// Stefan–Boltzmann constant (W·m⁻²·K⁻⁴).
 pub const STEFAN_BOLTZMANN: f32 = 5.670_374_4e-8;
@@ -80,6 +82,9 @@ pub struct Sim {
     pub climate: Climate,
     /// Accumulated simulation time (seconds).
     pub time: f64,
+    /// Tectonic plates and their motion. Empty until [`Sim::generate_terrain`] runs; geology and
+    /// climate share this struct because they will couple (currents, orographic effects) later.
+    pub terrain: Terrain,
     /// Current per-cell temperatures (K).
     temp: Vec<f32>,
     /// Scratch buffer for the double-buffered update.
@@ -87,14 +92,21 @@ pub struct Sim {
 }
 
 impl Sim {
-    /// Create a simulation with all cells at a uniform starting temperature.
+    /// Create a simulation with all cells at a uniform starting temperature. The terrain starts
+    /// empty; call [`Sim::generate_terrain`] (which needs the grid) to populate it.
     pub fn new(n: usize, climate: Climate, initial_temp: f32) -> Self {
         Self {
             climate,
             time: 0.0,
+            terrain: Terrain::empty(),
             temp: vec![initial_temp; n],
             scratch: vec![initial_temp; n],
         }
+    }
+
+    /// Generate the tectonic plates over `grid` (deterministic in `seed`).
+    pub fn generate_terrain(&mut self, grid: &Grid, num_plates: usize, seed: u64) {
+        self.terrain = Terrain::generate(grid, num_plates, seed);
     }
 
     /// Current per-cell temperatures (K).

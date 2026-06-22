@@ -8,11 +8,12 @@ struct Camera {
     eye: vec4<f32>,      // world-space camera position (xyz)
     sun: vec4<f32>,      // direction to the sun in the planet frame (xyz)
     params: vec4<f32>,   // x = data min, y = data max, z = show sunlight, w = show graticule
-    highlight: vec4<f32>,// x = hovered cell index, or -1 for none
+    highlight: vec4<f32>,// x = hovered cell index (or -1), y = layer index (0 temp, 1 plates)
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<storage, read> cell_data: array<f32>;
+@group(2) @binding(0) var<storage, read> plate_data: array<u32>;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -20,6 +21,7 @@ struct VsOut {
     @location(1) world: vec3<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) @interpolate(flat) cell: u32,
+    @location(4) @interpolate(flat) plate: u32,
 };
 
 @vertex
@@ -30,6 +32,7 @@ fn vs_main(@location(0) pos: vec3<f32>, @location(1) cell: u32) -> VsOut {
     out.world = pos;
     out.normal = normalize(pos);
     out.cell = cell;
+    out.plate = plate_data[cell];
     return out;
 }
 
@@ -51,6 +54,34 @@ fn colormap(t: f32) -> vec3<f32> {
     return mix(c3, c4, (x - 0.75) / 0.25);
 }
 
+fn hsv2rgb(c: vec3<f32>) -> vec3<f32> {
+    let h = fract(c.x) * 6.0;
+    let s = c.y;
+    let v = c.z;
+    let f = h - floor(h);
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    let m = i32(floor(h)) % 6;
+    if (m == 0) { return vec3<f32>(v, t, p); }
+    else if (m == 1) { return vec3<f32>(q, v, p); }
+    else if (m == 2) { return vec3<f32>(p, v, t); }
+    else if (m == 3) { return vec3<f32>(p, q, v); }
+    else if (m == 4) { return vec3<f32>(t, p, v); }
+    return vec3<f32>(v, p, q);
+}
+
+// Distinct categorical color per plate id. The golden-ratio hue step spreads adjacent ids far
+// apart on the color wheel, and small id-keyed wobbles in saturation/value separate neighbors
+// that happen to land near the same hue.
+fn plate_color(id: u32) -> vec3<f32> {
+    let fid = f32(id);
+    let h = fract(fid * 0.61803398875);
+    let s = 0.5 + 0.2 * fract(fid * 0.7);
+    let v = 0.78 + 0.12 * fract(fid * 0.37);
+    return hsv2rgb(vec3<f32>(h, s, v));
+}
+
 // Anti-aliased graticule line intensity: 1 near a multiple of `spacing` degrees, else 0.
 fn grid_line(value_deg: f32, spacing: f32) -> f32 {
     let scaled = value_deg / spacing;
@@ -61,10 +92,16 @@ fn grid_line(value_deg: f32, spacing: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let lo = camera.params.x;
-    let hi = camera.params.y;
-    let t = (in.value - lo) / max(hi - lo, 1e-3);
-    var color = colormap(t);
+    // Layer 0 = continuous data through the colormap; layer 1 = categorical plate palette.
+    var color: vec3<f32>;
+    if (camera.highlight.y > 0.5) {
+        color = plate_color(in.plate);
+    } else {
+        let lo = camera.params.x;
+        let hi = camera.params.y;
+        let t = (in.value - lo) / max(hi - lo, 1e-3);
+        color = colormap(t);
+    }
 
     let n = normalize(in.normal);
 
@@ -105,4 +142,11 @@ fn vs_marker(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
 @fragment
 fn fs_marker() -> @location(0) vec4<f32> {
     return vec4<f32>(1.0, 0.85, 0.2, 1.0); // amber outline
+}
+
+// --- Plate-motion arrows (line list, shares vs_marker; drawn just above the surface) ---
+
+@fragment
+fn fs_arrow() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.95, 0.97, 1.0, 1.0); // near-white
 }
