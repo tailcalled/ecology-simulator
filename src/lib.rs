@@ -46,8 +46,9 @@ mod wasm {
     const AUTO_ROTATE: f32 = 0.08;
     /// Starting temperature for every cell — Earth's mean surface temperature (K).
     const INITIAL_TEMP: f32 = 288.0;
-    /// Number of continental plates the terrain generator carves the planet into.
-    const NUM_PLATES: usize = 12;
+    /// Number of continental plates the terrain generator carves the planet into. Matches the
+    /// 52-plate PB2002 catalogue (Bird 2003); the default plate-size model is tuned to this count.
+    const NUM_PLATES: usize = 52;
     /// Seed for deterministic plate generation.
     const PLATE_SEED: u64 = 0xC0FFEE;
     /// Roughly how many cells to sample for the plate-motion arrow field.
