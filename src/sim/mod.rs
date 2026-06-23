@@ -9,12 +9,14 @@
 //! The per-cell update is data-parallel (rayon), reading a stable snapshot and writing a
 //! scratch buffer (double buffering), so neighbor reads never race writes.
 
+pub mod elevation;
 mod temperature;
 pub mod terrain;
 
 use glam::Vec3;
 
 use crate::grid::Grid;
+use elevation::Crust;
 use terrain::Terrain;
 
 /// Stefan–Boltzmann constant (W·m⁻²·K⁻⁴).
@@ -85,6 +87,8 @@ pub struct Sim {
     /// Tectonic plates and their motion. Empty until [`Sim::generate_terrain`] runs; geology and
     /// climate share this struct because they will couple (currents, orographic effects) later.
     pub terrain: Terrain,
+    /// Crust + elevation field, derived from the plates. Empty until [`Sim::generate_terrain`].
+    pub crust: Crust,
     /// Current per-cell temperatures (K).
     temp: Vec<f32>,
     /// Scratch buffer for the double-buffered update.
@@ -99,19 +103,27 @@ impl Sim {
             climate,
             time: 0.0,
             terrain: Terrain::empty(),
+            crust: Crust::empty(),
             temp: vec![initial_temp; n],
             scratch: vec![initial_temp; n],
         }
     }
 
-    /// Generate the tectonic plates over `grid` (deterministic in `seed`).
+    /// Generate the tectonic plates and the elevation field they imply over `grid` (deterministic
+    /// in `seed`). The crust is derived from the plates, so it is generated in the same pass.
     pub fn generate_terrain(&mut self, grid: &Grid, num_plates: usize, seed: u64) {
         self.terrain = Terrain::generate(grid, num_plates, seed);
+        self.crust = Crust::generate(grid, &self.terrain, seed);
     }
 
     /// Current per-cell temperatures (K).
     pub fn temperatures(&self) -> &[f32] {
         &self.temp
+    }
+
+    /// Per-cell surface elevation (m relative to sea level; negative = ocean floor).
+    pub fn elevations(&self) -> &[f32] {
+        &self.crust.elevation
     }
 
     /// Unit direction toward the sun in the planet's frame, at the given sim time.

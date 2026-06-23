@@ -64,6 +64,9 @@ pub struct Renderer {
     /// Per-cell center (lon, lat) in radians (static); read by the map-projection vertex shader.
     center_buf: wgpu::Buffer,
     center_bind_group: wgpu::BindGroup,
+    /// Per-cell elevation in metres (static after terrain generation); the elevation layer's data.
+    elev_buf: wgpu::Buffer,
+    elev_bind_group: wgpu::BindGroup,
     marker_pipeline: wgpu::RenderPipeline,
     marker_buf: wgpu::Buffer,
     marker_capacity: u32,
@@ -233,6 +236,10 @@ impl Renderer {
             label: Some("center-bgl"),
             entries: &[storage_bgl_entry],
         });
+        let elev_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("elev-bgl"),
+            entries: &[storage_bgl_entry],
+        });
 
         // --- Shared geometry + per-cell data ---
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -286,6 +293,22 @@ impl Renderer {
                 resource: center_buf.as_entire_binding(),
             }],
         });
+        // Per-cell elevation (one f32 each). Uploaded once after terrain generation; zero-filled
+        // until then so the buffer is always bound and the pipeline is valid.
+        let elev_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("elev-data"),
+            size: (n_cells.max(1) * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let elev_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("elev-bg"),
+            layout: &elev_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: elev_buf.as_entire_binding(),
+            }],
+        });
 
         // --- Pipeline ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -299,6 +322,7 @@ impl Renderer {
                 Some(&cell_bgl),
                 Some(&plate_bgl),
                 Some(&center_bgl),
+                Some(&elev_bgl),
             ],
             immediate_size: 0,
         });
@@ -516,6 +540,8 @@ impl Renderer {
             plate_bind_group,
             center_buf,
             center_bind_group,
+            elev_buf,
+            elev_bind_group,
             marker_pipeline,
             marker_buf,
             marker_capacity: MARKER_CAPACITY,
@@ -582,6 +608,13 @@ impl Renderer {
     pub fn upload_cell_centers(&self, centers: &[Vec2]) {
         self.queue
             .write_buffer(&self.center_buf, 0, bytemuck::cast_slice(centers));
+    }
+
+    /// Upload the per-cell elevations in metres (static after terrain generation), read by the
+    /// elevation layer's hypsometric colormap.
+    pub fn upload_elevation(&self, elev: &[f32]) {
+        self.queue
+            .write_buffer(&self.elev_buf, 0, bytemuck::cast_slice(elev));
     }
 
     /// Upload the plate-motion arrow field (line-list world positions). Static after generation;
@@ -677,6 +710,7 @@ impl Renderer {
                 pass.set_bind_group(1, &self.cell_bind_group, &[]);
                 pass.set_bind_group(2, &self.plate_bind_group, &[]);
                 pass.set_bind_group(3, &self.center_bind_group, &[]);
+                pass.set_bind_group(4, &self.elev_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
                 pass.draw(0..self.vertex_count, 0..1);
 

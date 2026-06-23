@@ -65,6 +65,7 @@
         <input id="speedSlider" type="range" min="0" max="16" step="1" value="12" disabled />
         <span id="speedLabel">5000×</span>
       </label>
+      <button id="regenBtn" title="Regenerate the world from a new random seed" disabled>🎲 New world</button>
       <span id="statusText">initializing…</span>
     </div>
     <div id="views">
@@ -77,6 +78,7 @@
             <div class="menu">
               <div class="sep">Layer</div>
               <label><input type="radio" name="layer0" class="layer" data-view="0" value="temperature" checked /> Temperature</label>
+              <label><input type="radio" name="layer0" class="layer" data-view="0" value="elevation" /> Elevation</label>
               <label><input type="radio" name="layer0" class="layer" data-view="0" value="plates" /> Plates</label>
               <div class="sep">Projection</div>
               <label><input type="radio" name="proj0" class="proj" data-view="0" value="sphere" checked /> Globe (3D)</label>
@@ -100,6 +102,7 @@
             <div class="menu">
               <div class="sep">Layer</div>
               <label><input type="radio" name="layer1" class="layer" data-view="1" value="temperature" checked /> Temperature</label>
+              <label><input type="radio" name="layer1" class="layer" data-view="1" value="elevation" /> Elevation</label>
               <label><input type="radio" name="layer1" class="layer" data-view="1" value="plates" /> Plates</label>
               <div class="sep">Overlays</div>
               <label><input type="checkbox" class="ov" data-view="1" data-ov="sunlight" checked /> Sunlight</label>

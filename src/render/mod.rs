@@ -48,6 +48,8 @@ impl Projection {
 pub enum Layer {
     Temperature,
     Plates,
+    /// Surface elevation through a hypsometric (bathymetry/topography) colormap.
+    Elevation,
 }
 
 impl Layer {
@@ -56,15 +58,17 @@ impl Layer {
         match s {
             "temperature" => Some(Layer::Temperature),
             "plates" => Some(Layer::Plates),
+            "elevation" => Some(Layer::Elevation),
             _ => None,
         }
     }
 
-    /// Layer index passed to the shader (selects colormap vs. plate palette).
+    /// Layer index passed to the shader (selects which per-cell field + colormap to use).
     pub fn index(self) -> u32 {
         match self {
             Layer::Temperature => 0,
             Layer::Plates => 1,
+            Layer::Elevation => 2,
         }
     }
 
@@ -75,6 +79,26 @@ impl Layer {
             // Kelvin: ~ −63 °C (210 K) to ~ 77 °C (350 K).
             Layer::Temperature => (210.0, 350.0),
             Layer::Plates => (0.0, 1.0),
+            // Metres: deepest trench to highest peak; the colormap pivots at 0 (sea level).
+            Layer::Elevation => (-8000.0, 6000.0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Parse and validate the cell shader on the host. wgpu only compiles WGSL at runtime in the
+    /// browser, so without this a shader typo (a missing binding, a type error, an undeclared
+    /// varying) would only surface as a blank canvas in a GPU-backed browser session. naga is the
+    /// very validator wgpu uses internally.
+    #[test]
+    fn cells_shader_is_valid_wgsl() {
+        let src = include_str!("shaders/cells.wgsl");
+        let module = naga::front::wgsl::parse_str(src).expect("WGSL parse error in cells.wgsl");
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator.validate(&module).expect("WGSL validation error in cells.wgsl");
     }
 }

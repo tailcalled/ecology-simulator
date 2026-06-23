@@ -12,6 +12,7 @@
 // host. They are intentionally free of wgpu / wasm-bindgen.
 pub mod grid;
 pub mod render;
+pub(crate) mod rng;
 pub mod sim;
 
 #[cfg(target_arch = "wasm32")]
@@ -105,6 +106,7 @@ mod wasm {
             .await
             .map_err(|e| JsValue::from_str(&e))?;
         renderer.upload_plate_data(&sim.terrain.plate_id);
+        renderer.upload_elevation(sim.elevations());
         renderer.upload_cell_centers(&build_cell_centers(&grid));
         renderer.set_arrows(&arrows);
 
@@ -122,6 +124,25 @@ mod wasm {
         });
         log::info!("engine_init: GPU ready");
         Ok(())
+    }
+
+    /// Regenerate the planet's terrain (plates + elevation) from a new `seed`, refreshing the
+    /// static GPU data (plate ids, elevation, motion arrows). The climate state (temperatures) is
+    /// left running, so the day/night cycle continues uninterrupted over the new geography.
+    #[wasm_bindgen]
+    pub fn engine_regenerate(seed: u32) {
+        ENGINE.with(|cell| {
+            if let Some(engine) = cell.borrow_mut().as_mut() {
+                // Spread the 32-bit UI seed across the 64-bit generator space.
+                let seed = (seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ PLATE_SEED;
+                engine.sim.generate_terrain(&engine.grid, NUM_PLATES, seed);
+                engine.renderer.upload_plate_data(&engine.sim.terrain.plate_id);
+                engine.renderer.upload_elevation(engine.sim.elevations());
+                let arrows =
+                    build_arrows(&engine.grid, &engine.sim.terrain.velocity, ARROW_SAMPLES);
+                engine.renderer.set_arrows(&arrows);
+            }
+        });
     }
 
     /// Resize a view's surface (view index 0 = globe, 1 = zoomed).
@@ -174,6 +195,8 @@ mod wasm {
         pub lon: f32,
         pub lat: f32,
         pub plate: u32,
+        /// Surface elevation in metres relative to sea level (negative = below sea level).
+        pub elev: f32,
     }
 
     /// Camera (view-projection + eye) for a view index: 0 = globe, 1 = zoomed. In a map
@@ -231,12 +254,14 @@ mod wasm {
                     engine.renderer.set_highlight(view, Some(idx as u32));
                     let ll = engine.grid.lonlat_deg[idx];
                     let plate = engine.sim.terrain.plate_id.get(idx).copied().unwrap_or(0);
+                    let elev = engine.sim.elevations().get(idx).copied().unwrap_or(0.0);
                     Some(PickInfo {
                         cell: idx as u32,
                         temp: engine.sim.temperatures()[idx],
                         lon: ll.x,
                         lat: ll.y,
                         plate,
+                        elev,
                     })
                 }
                 None => {

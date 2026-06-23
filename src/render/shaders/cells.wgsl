@@ -8,8 +8,8 @@ struct Camera {
     eye: vec4<f32>,      // world-space camera position (xyz)
     sun: vec4<f32>,      // direction to the sun in the planet frame (xyz)
     params: vec4<f32>,   // x = data min, y = data max, z = show sunlight, w = show graticule
-    highlight: vec4<f32>,// x = hovered cell index (or -1), y = layer index (0 temp, 1 plates),
-                         // z = projection (0 sphere, 1 Winkel Tripel map)
+    highlight: vec4<f32>,// x = hovered cell index (or -1), y = layer index (0 temp, 1 plates,
+                         // 2 elevation), z = projection (0 sphere, 1 Winkel Tripel map)
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -17,6 +17,8 @@ struct Camera {
 @group(2) @binding(0) var<storage, read> plate_data: array<u32>;
 // Per-cell center (longitude, latitude) in radians; used to unwrap the seam in map projections.
 @group(3) @binding(0) var<storage, read> cell_center: array<vec2<f32>>;
+// Per-cell surface elevation in metres relative to sea level (static after terrain generation).
+@group(4) @binding(0) var<storage, read> elev_data: array<f32>;
 
 const PI: f32 = 3.141592653589793;
 
@@ -40,6 +42,7 @@ struct VsOut {
     @location(2) normal: vec3<f32>,
     @location(3) @interpolate(flat) cell: u32,
     @location(4) @interpolate(flat) plate: u32,
+    @location(5) @interpolate(flat) elev: f32,
 };
 
 @vertex
@@ -64,6 +67,7 @@ fn vs_main(@location(0) pos: vec3<f32>, @location(1) cell: u32) -> VsOut {
     out.normal = normalize(pos);
     out.cell = cell;
     out.plate = plate_data[cell];
+    out.elev = elev_data[cell];
     return out;
 }
 
@@ -113,6 +117,28 @@ fn plate_color(id: u32) -> vec3<f32> {
     return hsv2rgb(vec3<f32>(h, s, v));
 }
 
+// Hypsometric tint for an elevation `e` (metres, sea level at 0). Below sea level: a bathymetric
+// blue ramp deepening with depth (`lo` is the deepest, negative). Above: land greens → tan → brown
+// → snow up to `hi`. The hard switch at 0 renders a crisp coastline.
+fn hypsometric(e: f32, lo: f32, hi: f32) -> vec3<f32> {
+    if (e <= 0.0) {
+        let t = clamp(e / lo, 0.0, 1.0); // 0 at the shore, 1 at the deepest trench
+        let shelf = vec3<f32>(0.32, 0.58, 0.74); // shallow shelf
+        let mid = vec3<f32>(0.09, 0.30, 0.58);   // open ocean
+        let deep = vec3<f32>(0.02, 0.06, 0.22);  // abyssal / trench
+        if (t < 0.5) { return mix(shelf, mid, t / 0.5); }
+        return mix(mid, deep, (t - 0.5) / 0.5);
+    }
+    let t = clamp(e / hi, 0.0, 1.0);             // 0 at the shore, 1 at the highest peak
+    let low = vec3<f32>(0.24, 0.52, 0.26);       // lowland green
+    let tan = vec3<f32>(0.60, 0.55, 0.30);       // dry uplands
+    let brown = vec3<f32>(0.45, 0.31, 0.20);     // mountains
+    let snow = vec3<f32>(0.95, 0.95, 0.97);      // peaks
+    if (t < 0.33) { return mix(low, tan, t / 0.33); }
+    if (t < 0.66) { return mix(tan, brown, (t - 0.33) / 0.33); }
+    return mix(brown, snow, (t - 0.66) / 0.34);
+}
+
 // Anti-aliased graticule line intensity: 1 near a multiple of `spacing` degrees, else 0.
 fn grid_line(value_deg: f32, spacing: f32) -> f32 {
     let scaled = value_deg / spacing;
@@ -123,13 +149,16 @@ fn grid_line(value_deg: f32, spacing: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Layer 0 = continuous data through the colormap; layer 1 = categorical plate palette.
+    // Layer 0 = continuous data through the colormap; 1 = categorical plate palette; 2 = elevation
+    // through the hypsometric ramp.
+    let lo = camera.params.x;
+    let hi = camera.params.y;
     var color: vec3<f32>;
-    if (camera.highlight.y > 0.5) {
+    if (camera.highlight.y > 1.5) {
+        color = hypsometric(in.elev, lo, hi);
+    } else if (camera.highlight.y > 0.5) {
         color = plate_color(in.plate);
     } else {
-        let lo = camera.params.x;
-        let hi = camera.params.y;
         let t = (in.value - lo) / max(hi - lo, 1e-3);
         color = colormap(t);
     }

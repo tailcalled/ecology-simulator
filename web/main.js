@@ -4,6 +4,7 @@
 
 const statusEl = document.getElementById('statusText');
 const speedSlider = document.getElementById('speedSlider');
+const regenBtn = document.getElementById('regenBtn');
 const speedLabel = document.getElementById('speedLabel');
 const tooltipEl = document.getElementById('tooltip');
 const setStatus = (msg) => { statusEl.textContent = msg; };
@@ -47,6 +48,7 @@ worker.onmessage = (e) => {
     setStatus(msg.text);
     running = true;
     speedSlider.disabled = false;
+    regenBtn.disabled = false;
     lastT = performance.now();
     requestAnimationFrame(loop);
   } else if (msg.type === 'frame') {
@@ -112,6 +114,12 @@ function applySpeed() {
 }
 speedSlider.addEventListener('input', applySpeed);
 
+// Regenerate the world from a fresh random 32-bit seed.
+regenBtn.addEventListener('click', () => {
+  const seed = (crypto.getRandomValues(new Uint32Array(1))[0]) >>> 0;
+  worker.postMessage({ type: 'regenerate', seed });
+});
+
 // Forward base-layer selection (radio buttons) per view.
 for (const r of document.querySelectorAll('input.layer')) {
   r.addEventListener('change', () => {
@@ -162,9 +170,11 @@ function updateTooltip(info) {
     return;
   }
   const c = (info.temp - 273.15).toFixed(1);
+  const elev = Math.round(info.elev);
+  const terrain = elev > 0 ? `▲ ${elev} m` : `▼ ${-elev} m`;
   tooltipEl.innerHTML =
     `<div class="temp">${info.temp.toFixed(1)} K · ${c} °C</div>` +
-    `<div class="coord">Plate ${info.plate} · ${info.lat.toFixed(1)}°, ${info.lon.toFixed(1)}°</div>`;
+    `<div class="coord">${terrain} · Plate ${info.plate} · ${info.lat.toFixed(1)}°, ${info.lon.toFixed(1)}°</div>`;
   tooltipEl.style.display = 'block';
 }
 

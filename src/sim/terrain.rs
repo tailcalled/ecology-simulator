@@ -23,6 +23,7 @@
 use glam::Vec3;
 
 use crate::grid::Grid;
+use crate::rng::Rng;
 
 /// One rigid plate: a rotation of the sphere about `axis` (a unit Euler pole through the center)
 /// at signed angular speed `rate` (radians per simulation second; sign sets the spin direction).
@@ -215,29 +216,9 @@ const DEFAULT_SIZE_MODEL: SizeModel = SizeModel::Lognormal(DEFAULT_SIGMA);
 /// CV, so fewer plates would call for a smaller σ (≈0.66 to match just the 12 largest).
 const DEFAULT_SIGMA: f32 = 1.56;
 
-/// Tiny deterministic PRNG (SplitMix64). Self-contained so plate generation is reproducible
-/// without pulling in a random-number crate, matching the grid's deterministic construction.
-struct Rng(u64);
-
+/// Plate-size weight draws layered on the shared [`Rng`]: the heavy-tailed distributions that
+/// shape the plate-area spectrum. (The general-purpose PRNG primitives live in [`crate::rng`].)
 impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// Uniform f32 in [0, 1).
-    fn unit_f32(&mut self) -> f32 {
-        // Top 24 bits → exact float in [0, 1).
-        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
-    }
-
     /// Pareto-distributed weight `u^(−1/exponent)` for `u ∈ (0, 1)`: mostly near 1 with a heavy
     /// tail of large values. Smaller `exponent` → heavier tail. Clamped to tame the rare extreme
     /// draw so a single plate can't swallow nearly the whole sphere.
@@ -246,26 +227,11 @@ impl Rng {
         u.powf(-1.0 / exponent.max(0.1)).min(MAX_WEIGHT)
     }
 
-    /// Standard-normal sample via the Box–Muller transform.
-    fn normal(&mut self) -> f32 {
-        let u1 = self.unit_f32().max(1e-6);
-        let u2 = self.unit_f32();
-        (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
-    }
-
     /// Lognormal weight `exp(sigma·z)`, `z ~ N(0, 1)`. The location parameter is fixed at 0
     /// because only relative weights matter — `exp(mu)` would scale all weights equally and
     /// cancel out of the growth-selection probabilities. Clamped like [`Self::pareto`].
     fn lognormal(&mut self, sigma: f32) -> f32 {
         (sigma * self.normal()).exp().min(MAX_WEIGHT)
-    }
-
-    /// Uniformly-distributed unit vector on the sphere (z uniform, azimuth uniform).
-    fn unit_vec(&mut self) -> Vec3 {
-        let z = self.unit_f32() * 2.0 - 1.0;
-        let theta = self.unit_f32() * std::f32::consts::TAU;
-        let r = (1.0 - z * z).max(0.0).sqrt();
-        Vec3::new(r * theta.cos(), r * theta.sin(), z)
     }
 }
 

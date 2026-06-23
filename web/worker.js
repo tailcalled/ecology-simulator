@@ -8,6 +8,7 @@ import init, {
   engine_tick,
   engine_resize,
   engine_set_layer,
+  engine_regenerate,
   engine_set_overlay,
   engine_set_projection,
   engine_pan_zoom,
@@ -56,6 +57,9 @@ self.onmessage = async (e) => {
       case 'layer':
         if (initialized) engine_set_layer(msg.view, msg.layer);
         break;
+      case 'regenerate':
+        if (initialized) engine_regenerate(msg.seed >>> 0);
+        break;
       case 'overlay':
         if (initialized) engine_set_overlay(msg.view, msg.which, msg.enabled);
         break;
@@ -74,7 +78,7 @@ self.onmessage = async (e) => {
           // Marshal the wasm struct into a plain object, then free it.
           let plain = null;
           if (info) {
-            plain = { cell: info.cell, temp: info.temp, lon: info.lon, lat: info.lat, plate: info.plate };
+            plain = { cell: info.cell, temp: info.temp, lon: info.lon, lat: info.lat, plate: info.plate, elev: info.elev };
             info.free();
           }
           post('hoverInfo', { view: msg.view, info: plain });
