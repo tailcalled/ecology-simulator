@@ -5,13 +5,13 @@
 //! `!Send`/`!Sync` under wasm atomics).
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 use wasm_bindgen::JsValue;
 use wgpu::util::DeviceExt;
 use web_sys::OffscreenCanvas;
 
 use super::mesh::Vertex;
-use super::Layer;
+use super::{Layer, Projection};
 
 /// Per-view camera/overlay uniform (std140: mat4 + 4·vec4 = 128 bytes).
 #[repr(C)]
@@ -29,6 +29,8 @@ struct CameraUniform {
 pub struct ViewCamera {
     pub view_proj: Mat4,
     pub eye: Vec3,
+    /// How the vertex shader maps the sphere to the screen for this view.
+    pub projection: Projection,
 }
 
 struct View {
@@ -59,6 +61,9 @@ pub struct Renderer {
     /// Per-cell plate id (static after terrain generation); colored via the plate palette.
     plate_buf: wgpu::Buffer,
     plate_bind_group: wgpu::BindGroup,
+    /// Per-cell center (lon, lat) in radians (static); read by the map-projection vertex shader.
+    center_buf: wgpu::Buffer,
+    center_bind_group: wgpu::BindGroup,
     marker_pipeline: wgpu::RenderPipeline,
     marker_buf: wgpu::Buffer,
     marker_capacity: u32,
@@ -224,6 +229,10 @@ impl Renderer {
             label: Some("plate-bgl"),
             entries: &[storage_bgl_entry],
         });
+        let center_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("center-bgl"),
+            entries: &[storage_bgl_entry],
+        });
 
         // --- Shared geometry + per-cell data ---
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -261,6 +270,22 @@ impl Renderer {
                 resource: plate_buf.as_entire_binding(),
             }],
         });
+        // Per-cell center (lon, lat) radians as a vec2<f32> each. Uploaded once after grid build;
+        // zero-filled until then so the buffer is always bound and the pipeline is valid.
+        let center_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("center-data"),
+            size: (n_cells.max(1) * std::mem::size_of::<[f32; 2]>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let center_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("center-bg"),
+            layout: &center_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: center_buf.as_entire_binding(),
+            }],
+        });
 
         // --- Pipeline ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -269,7 +294,12 @@ impl Renderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline-layout"),
-            bind_group_layouts: &[Some(&camera_bgl), Some(&cell_bgl), Some(&plate_bgl)],
+            bind_group_layouts: &[
+                Some(&camera_bgl),
+                Some(&cell_bgl),
+                Some(&plate_bgl),
+                Some(&center_bgl),
+            ],
             immediate_size: 0,
         });
         let vertex_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32];
@@ -484,6 +514,8 @@ impl Renderer {
             cell_bind_group,
             plate_buf,
             plate_bind_group,
+            center_buf,
+            center_bind_group,
             marker_pipeline,
             marker_buf,
             marker_capacity: MARKER_CAPACITY,
@@ -545,6 +577,13 @@ impl Renderer {
             .write_buffer(&self.plate_buf, 0, bytemuck::cast_slice(ids));
     }
 
+    /// Upload the per-cell center (lon, lat) radians (static after grid build), read by the
+    /// map-projection vertex shader to unwrap cells across the antimeridian.
+    pub fn upload_cell_centers(&self, centers: &[Vec2]) {
+        self.queue
+            .write_buffer(&self.center_buf, 0, bytemuck::cast_slice(centers));
+    }
+
     /// Upload the plate-motion arrow field (line-list world positions). Static after generation;
     /// drawn per view when the motion overlay is on.
     pub fn set_arrows(&mut self, points: &[Vec3]) {
@@ -586,7 +625,7 @@ impl Renderer {
                 highlight: [
                     v.highlight.map_or(-1.0, |c| c as f32),
                     v.layer.index() as f32,
-                    0.0,
+                    cam.projection.index() as f32,
                     0.0,
                 ],
             };
@@ -637,6 +676,7 @@ impl Renderer {
                 pass.set_bind_group(0, &v.camera_bind_group, &[]);
                 pass.set_bind_group(1, &self.cell_bind_group, &[]);
                 pass.set_bind_group(2, &self.plate_bind_group, &[]);
+                pass.set_bind_group(3, &self.center_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
                 pass.draw(0..self.vertex_count, 0..1);
 

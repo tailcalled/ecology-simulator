@@ -24,10 +24,10 @@ mod wasm {
     use glam::Vec2;
 
     use crate::grid::Grid;
-    use crate::render::camera::{OrbitCamera, SurfaceCamera};
-    use crate::render::mesh::{build_arrows, build_mesh};
-    use crate::render::pick::ray_sphere;
-    use crate::render::{Layer, Renderer, ViewCamera};
+    use crate::render::camera::{winkel_view_proj, OrbitCamera, SurfaceCamera};
+    use crate::render::mesh::{build_arrows, build_cell_centers, build_mesh};
+    use crate::render::pick::{ray_sphere, unproject_winkel};
+    use crate::render::{Layer, Projection, Renderer, ViewCamera};
     use crate::sim::{Climate, Sim};
 
     // Re-export the rayon thread-pool initializer; wasm-bindgen exposes it to JS as
@@ -62,6 +62,8 @@ mod wasm {
         renderer: Renderer,
         globe: OrbitCamera,
         zoom: SurfaceCamera,
+        /// Screen projection per view (index 0 = globe, 1 = zoomed). Defaults to the 3D globe.
+        projection: [Projection; 2],
         /// Simulation seconds advanced per real second. 0 = paused, 1 = real-time.
         time_scale: f32,
         frame: u64,
@@ -103,6 +105,7 @@ mod wasm {
             .await
             .map_err(|e| JsValue::from_str(&e))?;
         renderer.upload_plate_data(&sim.terrain.plate_id);
+        renderer.upload_cell_centers(&build_cell_centers(&grid));
         renderer.set_arrows(&arrows);
 
         ENGINE.with(|cell| {
@@ -112,6 +115,7 @@ mod wasm {
                 renderer,
                 globe: OrbitCamera::default(),
                 zoom: SurfaceCamera::default(),
+                projection: [Projection::Sphere, Projection::Sphere],
                 time_scale: DEFAULT_TIME_SCALE,
                 frame: 0,
             });
@@ -172,13 +176,44 @@ mod wasm {
         pub plate: u32,
     }
 
-    /// Camera (view-projection + eye) for a view index: 0 = globe, 1 = zoomed.
+    /// Camera (view-projection + eye) for a view index: 0 = globe, 1 = zoomed. In a map
+    /// projection the matrix is the flat-map orthographic transform and the eye is unused.
     fn view_camera(engine: &Engine, view: usize) -> Option<(glam::Mat4, glam::Vec3)> {
         let aspect = engine.renderer.aspect(view);
-        match view {
-            0 => Some((engine.globe.view_proj(aspect), engine.globe.eye())),
-            1 => Some((engine.zoom.view_proj(aspect), engine.zoom.eye())),
-            _ => None,
+        let (base_proj, eye) = match view {
+            0 => (engine.globe.view_proj(aspect), engine.globe.eye()),
+            1 => (engine.zoom.view_proj(aspect), engine.zoom.eye()),
+            _ => return None,
+        };
+        let proj = match engine.projection[view] {
+            Projection::Sphere => base_proj,
+            Projection::WinkelTripel => winkel_view_proj(aspect),
+        };
+        Some((proj, eye))
+    }
+
+    /// Turn an NDC cursor position into the surface point it points at, using whichever
+    /// projection the view is currently drawn with.
+    fn pick(engine: &Engine, view: usize, ndc: Vec2) -> Option<glam::Vec3> {
+        let (view_proj, eye) = view_camera(engine, view)?;
+        match engine.projection[view] {
+            Projection::Sphere => ray_sphere(view_proj, eye, ndc),
+            Projection::WinkelTripel => unproject_winkel(view_proj, ndc),
+        }
+    }
+
+    /// Select the screen projection for a view ("sphere" or "winkel"), from the UI.
+    #[wasm_bindgen]
+    pub fn engine_set_projection(view: usize, kind: &str) {
+        if view > 1 {
+            return;
+        }
+        if let Some(proj) = Projection::from_str(kind) {
+            ENGINE.with(|cell| {
+                if let Some(engine) = cell.borrow_mut().as_mut() {
+                    engine.projection[view] = proj;
+                }
+            });
         }
     }
 
@@ -190,8 +225,7 @@ mod wasm {
         ENGINE.with(|cell| {
             let mut guard = cell.borrow_mut();
             let engine = guard.as_mut()?;
-            let (view_proj, eye) = view_camera(engine, view)?;
-            match ray_sphere(view_proj, eye, Vec2::new(ndc_x, ndc_y)) {
+            match pick(engine, view, Vec2::new(ndc_x, ndc_y)) {
                 Some(hit) => {
                     let idx = engine.grid.nearest_cell(hit);
                     engine.renderer.set_highlight(view, Some(idx as u32));
@@ -229,10 +263,8 @@ mod wasm {
     pub fn engine_click_move(ndc_x: f32, ndc_y: f32) {
         ENGINE.with(|cell| {
             if let Some(engine) = cell.borrow_mut().as_mut() {
-                if let Some((view_proj, eye)) = view_camera(engine, 0) {
-                    if let Some(hit) = ray_sphere(view_proj, eye, Vec2::new(ndc_x, ndc_y)) {
-                        engine.zoom.target = hit;
-                    }
+                if let Some(hit) = pick(engine, 0, Vec2::new(ndc_x, ndc_y)) {
+                    engine.zoom.target = hit;
                 }
             }
         });
@@ -279,13 +311,19 @@ mod wasm {
             let marker = engine.zoom.footprint_outline(12);
             engine.renderer.set_marker(&marker);
 
+            // Build each view's camera through `view_camera` so the active projection (3D globe
+            // or flat map) is applied consistently with picking.
+            let (globe_vp, globe_eye) = view_camera(engine, 0).unwrap();
+            let (zoom_vp, zoom_eye) = view_camera(engine, 1).unwrap();
             let globe_cam = ViewCamera {
-                view_proj: engine.globe.view_proj(engine.renderer.aspect(0)),
-                eye: engine.globe.eye(),
+                view_proj: globe_vp,
+                eye: globe_eye,
+                projection: engine.projection[0],
             };
             let zoom_cam = ViewCamera {
-                view_proj: engine.zoom.view_proj(engine.renderer.aspect(1)),
-                eye: engine.zoom.eye(),
+                view_proj: zoom_vp,
+                eye: zoom_eye,
+                projection: engine.projection[1],
             };
             engine.renderer.render([globe_cam, zoom_cam], sun);
         });

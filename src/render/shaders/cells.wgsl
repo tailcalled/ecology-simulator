@@ -8,12 +8,30 @@ struct Camera {
     eye: vec4<f32>,      // world-space camera position (xyz)
     sun: vec4<f32>,      // direction to the sun in the planet frame (xyz)
     params: vec4<f32>,   // x = data min, y = data max, z = show sunlight, w = show graticule
-    highlight: vec4<f32>,// x = hovered cell index (or -1), y = layer index (0 temp, 1 plates)
+    highlight: vec4<f32>,// x = hovered cell index (or -1), y = layer index (0 temp, 1 plates),
+                         // z = projection (0 sphere, 1 Winkel Tripel map)
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<storage, read> cell_data: array<f32>;
 @group(2) @binding(0) var<storage, read> plate_data: array<u32>;
+// Per-cell center (longitude, latitude) in radians; used to unwrap the seam in map projections.
+@group(3) @binding(0) var<storage, read> cell_center: array<vec2<f32>>;
+
+const PI: f32 = 3.141592653589793;
+
+// Forward Winkel Tripel: (longitude, latitude) radians → map (x, y). Mirrors `winkel_tripel` in
+// camera.rs (kept in sync so host-side picking can invert it).
+fn winkel_xy(lon: f32, lat: f32) -> vec2<f32> {
+    let cos_phi1 = 2.0 / PI;                 // standard parallel, cos φ₁ = 2/π
+    let half_lon = 0.5 * lon;
+    let alpha = acos(clamp(cos(lat) * cos(half_lon), -1.0, 1.0));
+    var d = 1.0;                             // D = α / sin α → 1 as α → 0
+    if (abs(alpha) > 1e-7) { d = alpha / sin(alpha); }
+    let x = 0.5 * (lon * cos_phi1 + 2.0 * cos(lat) * sin(half_lon) * d);
+    let y = 0.5 * (lat + sin(lat) * d);
+    return vec2<f32>(x, y);
+}
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -27,9 +45,22 @@ struct VsOut {
 @vertex
 fn vs_main(@location(0) pos: vec3<f32>, @location(1) cell: u32) -> VsOut {
     var out: VsOut;
-    out.clip = camera.view_proj * vec4<f32>(pos, 1.0);
+    var world_pos = pos;
+    if (camera.highlight.z > 0.5) {
+        // Map projection: flatten the sphere onto the z = 0 plane.
+        let n = normalize(pos);
+        let lat = asin(clamp(n.z, -1.0, 1.0));
+        var lon = atan2(n.y, n.x);
+        // Unwrap onto the same 2π branch as this cell's center so cells spanning the ±180°
+        // antimeridian stay on one side instead of stretching across the whole map.
+        let clon = cell_center[cell].x;
+        lon = lon - 2.0 * PI * round((lon - clon) / (2.0 * PI));
+        let m = winkel_xy(lon, lat);
+        world_pos = vec3<f32>(m.x, m.y, 0.0);
+    }
+    out.clip = camera.view_proj * vec4<f32>(world_pos, 1.0);
     out.value = cell_data[cell];
-    out.world = pos;
+    out.world = pos;            // keep the sphere position for shading / graticule / sunlight
     out.normal = normalize(pos);
     out.cell = cell;
     out.plate = plate_data[cell];
@@ -105,10 +136,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     let n = normalize(in.normal);
 
-    // Subtle shading: brighter where the surface faces the camera, dimmer at the rim.
-    let view_dir = normalize(camera.eye.xyz - in.world);
-    let facing = clamp(dot(n, view_dir), 0.0, 1.0);
-    color *= 0.55 + 0.45 * facing;
+    // Subtle shading: brighter where the surface faces the camera, dimmer at the rim. The flat
+    // map has no rim and no meaningful eye direction, so this only applies to the 3D globe.
+    if (camera.highlight.z < 0.5) {
+        let view_dir = normalize(camera.eye.xyz - in.world);
+        let facing = clamp(dot(n, view_dir), 0.0, 1.0);
+        color *= 0.55 + 0.45 * facing;
+    }
 
     // Sunlight overlay: darken the night side, leaving a clear day/night terminator.
     if (camera.params.z > 0.5) {
@@ -136,7 +170,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
 @vertex
 fn vs_marker(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return camera.view_proj * vec4<f32>(pos, 1.0);
+    var world_pos = pos;
+    if (camera.highlight.z > 0.5) {
+        let n = normalize(pos);
+        let lat = asin(clamp(n.z, -1.0, 1.0));
+        let lon = atan2(n.y, n.x);
+        let m = winkel_xy(lon, lat);
+        // z > 0 lifts the line toward the eye (smaller clip depth than the z = 0 cells) so the
+        // overlay isn't rejected by the depth test on the flat map.
+        world_pos = vec3<f32>(m.x, m.y, 0.02);
+    }
+    return camera.view_proj * vec4<f32>(world_pos, 1.0);
 }
 
 @fragment

@@ -9,6 +9,7 @@ import init, {
   engine_resize,
   engine_set_layer,
   engine_set_overlay,
+  engine_set_projection,
   engine_pan_zoom,
   engine_set_time_scale,
   engine_hover,
@@ -57,6 +58,9 @@ self.onmessage = async (e) => {
         break;
       case 'overlay':
         if (initialized) engine_set_overlay(msg.view, msg.which, msg.enabled);
+        break;
+      case 'projection':
+        if (initialized) engine_set_projection(msg.view, msg.kind);
         break;
       case 'pan':
         if (initialized) engine_pan_zoom(msg.dEast, msg.dNorth);

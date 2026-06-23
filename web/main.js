@@ -121,6 +121,15 @@ for (const r of document.querySelectorAll('input.layer')) {
   });
 }
 
+// Forward projection selection (Globe / Winkel Tripel) per view.
+for (const r of document.querySelectorAll('input.proj')) {
+  r.addEventListener('change', () => {
+    if (r.checked) {
+      worker.postMessage({ type: 'projection', view: Number(r.dataset.view), kind: r.value });
+    }
+  });
+}
+
 // Forward overlay toggles (Sunlight / Lat-long lines) per view to the worker.
 for (const cb of document.querySelectorAll('input.ov')) {
   cb.addEventListener('change', () => {

@@ -6,7 +6,7 @@
 //! for the lifetime of the grid — only the per-cell data buffer changes each frame.
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 use crate::grid::Grid;
 
@@ -40,6 +40,16 @@ pub fn build_mesh(grid: &Grid) -> Vec<Vertex> {
         }
     }
     verts
+}
+
+/// Each cell's center as (longitude, latitude) in radians. The map-projection vertex shader uses
+/// the center longitude to unwrap each cell's ring vertices onto a single branch, so cells that
+/// straddle the ±180° antimeridian don't smear across the whole map.
+pub fn build_cell_centers(grid: &Grid) -> Vec<Vec2> {
+    grid.lonlat_deg
+        .iter()
+        .map(|ll| Vec2::new(ll.x.to_radians(), ll.y.to_radians()))
+        .collect()
 }
 
 /// Slightly outside the unit sphere, so overlay lines sit just above the cell surface (and the

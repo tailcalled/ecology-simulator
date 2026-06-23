@@ -11,6 +11,36 @@ mod gpu;
 #[cfg(target_arch = "wasm32")]
 pub use gpu::{Renderer, ViewCamera};
 
+/// How a view maps the unit sphere to the screen. `Sphere` is the orbiting 3D globe; the map
+/// projections flatten the planet to a static 2D map in the vertex shader (see `cells.wgsl`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Projection {
+    /// 3D globe rendered with the view's perspective camera.
+    #[default]
+    Sphere,
+    /// Winkel Tripel: a compromise map projection (low distortion in area, direction, distance).
+    WinkelTripel,
+}
+
+impl Projection {
+    /// Parse the projection id sent from the UI.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "sphere" => Some(Projection::Sphere),
+            "winkel" => Some(Projection::WinkelTripel),
+            _ => None,
+        }
+    }
+
+    /// Mode index passed to the shader (selects the vertex-stage projection).
+    pub fn index(self) -> u32 {
+        match self {
+            Projection::Sphere => 0,
+            Projection::WinkelTripel => 1,
+        }
+    }
+}
+
 /// A selectable visibility layer. Each view picks one; the shader colors cells by the layer's
 /// data, keyed on `index()`: continuous layers (e.g. `Temperature`) go through a colormap over
 /// `range()`, while `Plates` is categorical and gets a per-id palette color instead.
