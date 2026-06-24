@@ -26,7 +26,9 @@ mod wasm {
 
     use crate::grid::Grid;
     use crate::render::camera::{winkel_view_proj, OrbitCamera, SurfaceCamera};
-    use crate::render::mesh::{build_arrows, build_cell_centers, build_mesh};
+    use crate::render::mesh::{
+        arrow_sample_cells, build_arrows_at, build_cell_centers, build_mesh,
+    };
     use crate::render::pick::{ray_sphere, unproject_winkel};
     use crate::render::{Layer, Projection, Renderer, ViewCamera};
     use crate::sim::{Climate, Sim};
@@ -67,6 +69,9 @@ mod wasm {
         projection: [Projection; 2],
         /// Simulation seconds advanced per real second. 0 = paused, 1 = real-time.
         time_scale: f32,
+        /// Evenly-spread cell indices anchoring the arrow overlays (plate motion, wind). Depends
+        /// only on the grid, so it is computed once and reused every frame.
+        arrow_samples: Vec<u32>,
         frame: u64,
     }
 
@@ -100,7 +105,8 @@ mod wasm {
         let mut sim = Sim::new(grid.n, Climate::default(), INITIAL_TEMP);
         sim.generate_terrain(&grid, NUM_PLATES, PLATE_SEED);
         log::info!("engine_init: {} plates generated", sim.terrain.plates.len());
-        let arrows = build_arrows(&grid, &sim.terrain.velocity, ARROW_SAMPLES);
+        let arrow_samples = arrow_sample_cells(&grid, ARROW_SAMPLES);
+        let arrows = build_arrows_at(&grid, &sim.terrain.velocity, &arrow_samples);
 
         let mut renderer = Renderer::new(canvas0, canvas1, &mesh, grid.n)
             .await
@@ -119,6 +125,7 @@ mod wasm {
                 zoom: SurfaceCamera::default(),
                 projection: [Projection::Sphere, Projection::Sphere],
                 time_scale: DEFAULT_TIME_SCALE,
+                arrow_samples,
                 frame: 0,
             });
         });
@@ -138,8 +145,11 @@ mod wasm {
                 engine.sim.generate_terrain(&engine.grid, NUM_PLATES, seed);
                 engine.renderer.upload_plate_data(&engine.sim.terrain.plate_id);
                 engine.renderer.upload_elevation(engine.sim.elevations());
-                let arrows =
-                    build_arrows(&engine.grid, &engine.sim.terrain.velocity, ARROW_SAMPLES);
+                let arrows = build_arrows_at(
+                    &engine.grid,
+                    &engine.sim.terrain.velocity,
+                    &engine.arrow_samples,
+                );
                 engine.renderer.set_arrows(&arrows);
             }
         });
@@ -329,6 +339,11 @@ mod wasm {
             engine.globe.azimuth += AUTO_ROTATE * dt_real;
 
             engine.renderer.upload_cell_data(engine.sim.temperatures());
+
+            // Refresh the surface-wind arrow field from the live wind (diagnosed each step).
+            let wind_arrows =
+                build_arrows_at(&engine.grid, engine.sim.winds(), &engine.arrow_samples);
+            engine.renderer.set_wind_arrows(&wind_arrows);
 
             let sun = engine.sim.sun_direction(engine.sim.time);
 

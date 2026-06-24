@@ -8,7 +8,7 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3};
 
-use crate::grid::Grid;
+use crate::grid::{fibonacci_sphere, Grid};
 
 /// One mesh vertex: a position on the unit sphere plus the index of the cell it belongs to.
 #[repr(C)]
@@ -58,54 +58,81 @@ const OVERLAY_RADIUS: f32 = 1.012;
 /// World-space length of the longest motion arrow (great-circle radians ≈ chord at this scale).
 const ARROW_LEN: f32 = 0.06;
 
-/// Build a sparse field of motion arrows as a line list (vertex pairs), sampling roughly
-/// `target` cells. Each arrow is three segments — a shaft from the cell plus two barbs — drawn
-/// just above the surface; arrow length scales with the cell's speed relative to the fastest.
-/// Returns an empty vec when there is no velocity field (terrain not generated).
+/// Pick ~`target` cells spread *evenly over the sphere* to anchor an arrow field. Striding through
+/// the cell index instead would walk the Fibonacci lattice's own spiral and draw arrows in visible
+/// spiral lines; here we lay down `target` evenly-spaced directions (a coarse Fibonacci set) and
+/// snap each to its nearest cell, deduping collisions. The result depends only on the grid, so it
+/// is computed once and reused every frame.
+pub fn arrow_sample_cells(grid: &Grid, target: usize) -> Vec<u32> {
+    if grid.n == 0 || target == 0 {
+        return Vec::new();
+    }
+    let mut seen = vec![false; grid.n];
+    let mut out = Vec::with_capacity(target);
+    for p in fibonacci_sphere(target.min(grid.n)) {
+        let cell = grid.nearest_cell(p.as_vec3());
+        if !seen[cell] {
+            seen[cell] = true;
+            out.push(cell as u32);
+        }
+    }
+    out
+}
+
+/// Append one arrow (shaft + two barbs, 6 vertices) for tangent vector `v` at cell center `p` to
+/// `out`. `vmax` sets the length scale (longest arrow). No-op for ~zero or non-tangent vectors.
+fn emit_arrow(out: &mut Vec<Vec3>, p: Vec3, v: Vec3, vmax: f32) {
+    let speed = v.length();
+    if speed <= 1e-6 {
+        return;
+    }
+    // Direction of motion in the cell's tangent plane.
+    let dir = (v - p * v.dot(p)).normalize_or_zero();
+    if dir.length_squared() <= 0.5 {
+        return;
+    }
+    let len = ARROW_LEN * (speed / vmax).clamp(0.25, 1.0);
+    let base = p * OVERLAY_RADIUS;
+    let tip = (p + dir * len).normalize();
+    // Barbs: swept back from the tip by ~26° on either side, in the tangent plane.
+    let side = p.cross(dir).normalize_or_zero();
+    let back = -dir;
+    let (s, cth) = 0.45f32.sin_cos();
+    let barb_len = len * 0.4;
+    let e1 = (tip + (back * cth + side * s) * barb_len).normalize() * OVERLAY_RADIUS;
+    let e2 = (tip + (back * cth - side * s) * barb_len).normalize() * OVERLAY_RADIUS;
+    let tip = tip * OVERLAY_RADIUS;
+    out.extend_from_slice(&[base, tip, tip, e1, tip, e2]);
+}
+
+/// Build a motion-arrow line list (vertex pairs) at a precomputed set of evenly-spread sample
+/// cells (see [`arrow_sample_cells`]). Arrow length scales with each cell's speed relative to the
+/// fastest *among the samples*. Empty when there is no field or no samples.
+pub fn build_arrows_at(grid: &Grid, field: &[Vec3], samples: &[u32]) -> Vec<Vec3> {
+    if field.is_empty() || samples.is_empty() {
+        return Vec::new();
+    }
+    let vmax = samples
+        .iter()
+        .map(|&i| field[i as usize].length())
+        .fold(0.0f32, f32::max)
+        .max(1e-6);
+    let mut out = Vec::with_capacity(samples.len() * 6);
+    for &i in samples {
+        emit_arrow(&mut out, grid.centers[i as usize], field[i as usize], vmax);
+    }
+    out
+}
+
+/// Convenience wrapper: build an arrow field sampling ~`target` evenly-spread cells. Recomputes the
+/// sample set each call, so callers that draw every frame should instead cache
+/// [`arrow_sample_cells`] and call [`build_arrows_at`].
 pub fn build_arrows(grid: &Grid, velocity: &[Vec3], target: usize) -> Vec<Vec3> {
     if velocity.is_empty() || grid.n == 0 {
         return Vec::new();
     }
-    let n = grid.n;
-    let stride = (n / target.max(1)).max(1);
-    let vmax = velocity
-        .iter()
-        .map(|v| v.length())
-        .fold(0.0f32, f32::max)
-        .max(1e-6);
-
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < n {
-        let p = grid.centers[i];
-        let v = velocity[i];
-        let speed = v.length();
-        if speed > 1e-6 {
-            // Direction of motion in the cell's tangent plane.
-            let dir = (v - p * v.dot(p)).normalize_or_zero();
-            if dir.length_squared() > 0.5 {
-                let len = ARROW_LEN * (speed / vmax).clamp(0.25, 1.0);
-                let base = p * OVERLAY_RADIUS;
-                let tip = (p + dir * len).normalize();
-                // Barbs: swept back from the tip by ~26° on either side, in the tangent plane.
-                let side = p.cross(dir).normalize_or_zero();
-                let back = -dir;
-                let (s, cth) = 0.45f32.sin_cos();
-                let barb_len = len * 0.4;
-                let e1 = (tip + (back * cth + side * s) * barb_len).normalize() * OVERLAY_RADIUS;
-                let e2 = (tip + (back * cth - side * s) * barb_len).normalize() * OVERLAY_RADIUS;
-                let tip = tip * OVERLAY_RADIUS;
-                out.push(base);
-                out.push(tip);
-                out.push(tip);
-                out.push(e1);
-                out.push(tip);
-                out.push(e2);
-            }
-        }
-        i += stride;
-    }
-    out
+    let samples = arrow_sample_cells(grid, target);
+    build_arrows_at(grid, velocity, &samples)
 }
 
 #[cfg(test)]

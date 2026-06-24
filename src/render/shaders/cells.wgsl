@@ -223,3 +223,10 @@ fn fs_marker() -> @location(0) vec4<f32> {
 fn fs_arrow() -> @location(0) vec4<f32> {
     return vec4<f32>(0.95, 0.97, 1.0, 1.0); // near-white
 }
+
+// --- Surface-wind arrows (line list, shares vs_marker; distinct color from plate motion) ---
+
+@fragment
+fn fs_wind_arrow() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.25, 0.95, 0.95, 1.0); // cyan
+}

@@ -12,6 +12,7 @@
 pub mod elevation;
 mod temperature;
 pub mod terrain;
+pub mod wind;
 
 use glam::Vec3;
 
@@ -42,6 +43,58 @@ pub struct Climate {
     pub day_seconds: f32,
     /// Length of one year in simulation seconds.
     pub year_seconds: f32,
+
+    // --- Atmospheric transport (winds) ---
+    /// Planet radius (m). Turns the unit-sphere arc lengths into physical distances, needed for
+    /// temperature gradients (K·m⁻¹) and so wind speeds in m·s⁻¹.
+    pub planet_radius: f32,
+    /// Nominal peak speed of the zonal-mean belts (trades / westerlies / polar easterlies), m·s⁻¹,
+    /// at the reference equator-to-pole temperature contrast. Scales with the simulated contrast.
+    pub trade_wind_speed: f32,
+    /// Nominal peak speed of the meridional (poleward/equatorward) surface branch of the
+    /// overturning cells, m·s⁻¹. Smaller than the zonal speed, as on Earth.
+    pub meridional_wind_speed: f32,
+    /// Pressure-gradient acceleration per unit temperature gradient (m²·s⁻²·K⁻¹) — i.e.
+    /// `(dp/dT)/ρ` — converting the temperature gradient into the pressure-gradient force that
+    /// drives the geostrophic perturbation (the monsoon / continental-high departures, and the
+    /// only time-varying part of the wind as the day/night warm spot moves).
+    pub geostrophic_coeff: f32,
+    /// Linear surface-friction (Ekman drag) coefficient (s⁻¹) used in the diagnostic *seed* wind.
+    /// Turns the near-surface wind across the isobars toward low pressure; keeps the balance finite
+    /// at the equator. 0 = pure geostrophic (flow along isobars, singular at the equator).
+    pub wind_friction: f32,
+    /// Relaxation rate (s⁻¹) pulling the prognostic wind toward the analytic tri-cell belts. This
+    /// is what *maintains* the Hadley/Ferrel/Polar structure (which the dynamics can't generate on
+    /// their own) and also acts as the surface drag. Larger = belts dominate; smaller = freer eddies.
+    pub wind_relax: f32,
+    /// Eddy viscosity (s⁻¹, applied to the conductance-weighted velocity Laplacian) damping the
+    /// smallest scales so the central momentum advection stays numerically stable.
+    pub wind_viscosity: f32,
+    /// Extra lateral heat conductance representing mid-latitude baroclinic-eddy heat transport,
+    /// added to `diffusivity` and peaking in the storm-track band. This — not surface advection —
+    /// is what carries heat poleward and warms the poles. Same units as `diffusivity`.
+    pub eddy_diffusivity: f32,
+
+    // --- Atmosphere layer (two-layer grey radiation + convection) ---
+    /// Atmospheric IR emissivity/absorptivity ε_a (0..1): the greenhouse strength. The atmosphere
+    /// absorbs ε_a of the surface's thermal radiation and re-emits up and down, warming the surface
+    /// above its bare-rock emission temperature. ~0.78 lifts a 255 K surface to ~288 K.
+    pub atm_emissivity: f32,
+    /// Atmospheric areal heat capacity C_a (J·m⁻²·K⁻¹) — the column thermal mass (~1e7). Its
+    /// inertia, coupled to the surface by convection + back-radiation, buffers the diurnal swing.
+    pub atm_heat_capacity: f32,
+    /// Convective (sensible-heat) exchange coefficient (W·m⁻²·K⁻¹): the upward heat flux per degree
+    /// the surface is warmer than the air *beyond the lapse threshold*. This is the vertical venting
+    /// — hot surface air carries heat up into the atmosphere instead of the surface running away.
+    pub convection_coeff: f32,
+    /// Convective lapse threshold Γ (K): convection only fires when `T_s − T_a > Γ`, so the
+    /// atmosphere settles ~Γ below the surface. This keeps the air *colder* than the surface, which
+    /// is what makes the greenhouse work — without it, convection equalizes the layers and the
+    /// greenhouse vanishes. Stands in for the dry/moist adiabatic lapse rate over the layer depth.
+    pub convection_threshold: f32,
+    /// Lateral heat conductance within the atmosphere (same units as `diffusivity`); the atmosphere
+    /// mixes heat horizontally more freely than the surface.
+    pub atm_diffusivity: f32,
 }
 
 impl Default for Climate {
@@ -51,10 +104,9 @@ impl Default for Climate {
             solar_constant: 1361.0,
             // Earth's mean Bond albedo (dimensionless).
             albedo: 0.3,
-            // Effective emissivity < 1 to crudely stand in for greenhouse warming: it lifts the
-            // global-mean radiative equilibrium from the bare-rock 255 K up to Earth's ~288 K
-            // (εσT⁴ = S(1−α)/4 ⇒ T ≈ 288 K). Dimensionless.
-            emissivity: 0.61,
+            // Surface now radiates as a near-blackbody; the greenhouse is modelled explicitly by the
+            // atmosphere layer (`atm_emissivity`), so the old 0.61 fudge is gone. Dimensionless.
+            emissivity: 1.0,
             // ~0.75-day thermal time constant: strong, clearly visible diurnal swing with a
             // realistic afternoon-warm / pre-dawn-cold lag. Areal heat capacity, J·m⁻²·K⁻¹.
             heat_capacity: 4.0e5,
@@ -66,6 +118,47 @@ impl Default for Climate {
             day_seconds: 86_400.0,
             // Earth's year (365.25 days), seconds.
             year_seconds: 86_400.0 * 365.25,
+
+            // Earth's mean radius, metres.
+            planet_radius: 6.371e6,
+            // Peak surface trade/westerly speed (~7–10 m·s⁻¹ on Earth).
+            trade_wind_speed: 9.0,
+            // Meridional surface branch is weaker than the zonal flow.
+            meridional_wind_speed: 3.0,
+            // (dp/dT)/ρ ≈ (67 Pa·K⁻¹)/(1.2 kg·m⁻³): gives a few-m·s⁻¹ geostrophic perturbation for
+            // typical gradients, so weather-scale flow is visible alongside the steady belts.
+            geostrophic_coeff: 60.0,
+            // Light Rayleigh drag (~1.4-day timescale): dissipates eddies and bounds the wind near
+            // the equator, without flattening the belts (which the zonal-mean relaxation maintains).
+            wind_friction: 8.0e-6,
+            // Zonal-mean relaxation (~9-hour timescale): strongly holds the band-mean wind to the
+            // tri-cell belts. Acts only on the mean, so it preserves the cells without damping eddies.
+            wind_relax: 3.0e-5,
+            // Eddy viscosity sized against the momentum CFL (ν·maxΣw·dt well under 1) — small, so
+            // turbulence survives down toward the grid scale.
+            wind_viscosity: 2.0e-4,
+            // Storm-track eddy conductance — the dominant meridional heat transport (Budyko–Sellers
+            // EBM closure for unresolved baroclinic-eddy flux). Strong enough that down-gradient
+            // transport clearly overcomes the equatorward surface advection and warms the poles;
+            // self-limiting because it scales with the (shrinking) gradient. Sized against the
+            // diffusion CFL (see MAX_SUBSTEP).
+            eddy_diffusivity: 150.0,
+
+            // Greenhouse strength. The single-slab value for an Earth-like 288 K mean is ε_a≈0.78,
+            // but the strong spatial+diurnal variance here depresses the area-mean (⟨T⁴⟩>⟨T⟩⁴), so
+            // a stronger ε_a compensates to keep the mean near Earth's.
+            atm_emissivity: 0.90,
+            // Atmospheric column heat capacity (~p/g·c_p), much larger than the bare-rock surface.
+            atm_heat_capacity: 1.0e7,
+            // Sensible-heat exchange coefficient (W·m⁻²·K⁻¹): strong coupling pins the thin surface
+            // toward the high-inertia atmosphere (offset by the lapse threshold), capping the daytime
+            // overshoot and shrinking the diurnal swing.
+            convection_coeff: 35.0,
+            // Lapse threshold (K): the atmosphere sits ~33 K below the surface, preserving the
+            // greenhouse while convection still caps daytime overshoot.
+            convection_threshold: 33.0,
+            // The atmosphere mixes heat laterally more freely than the surface.
+            atm_diffusivity: 60.0,
         }
     }
 }
@@ -75,9 +168,11 @@ impl Default for Climate {
 const TEMP_FLOOR: f32 = 2.7;
 
 /// Largest internal integration step (sim seconds). The engine sub-steps to this bound so the
-/// explicit Euler update stays stable regardless of the wall-clock frame time. Chosen to keep
-/// the diffusion update well within its stability limit dt·D·Σw/C < 1 (here ≈ 0.26).
-const MAX_SUBSTEP: f32 = 700.0;
+/// explicit Euler update stays stable regardless of the wall-clock frame time. Chosen to keep the
+/// diffusion update well within its stability limit dt·D·Σw/C < 1 — now sized for the *peak*
+/// conductance (base `diffusivity` plus the storm-track `eddy_diffusivity` at the strongest
+/// gradient), which lands the worst-case CFL factor around 0.7. See `diffusion_substep_is_stable`.
+const MAX_SUBSTEP: f32 = 150.0;
 
 /// Climate simulation state over a [`Grid`].
 pub struct Sim {
@@ -89,10 +184,24 @@ pub struct Sim {
     pub terrain: Terrain,
     /// Crust + elevation field, derived from the plates. Empty until [`Sim::generate_terrain`].
     pub crust: Crust,
-    /// Current per-cell temperatures (K).
+    /// Current per-cell surface temperatures (K).
     temp: Vec<f32>,
-    /// Scratch buffer for the double-buffered update.
+    /// Scratch buffer for the double-buffered surface update.
     scratch: Vec<f32>,
+    /// Current per-cell atmosphere-layer temperatures (K).
+    temp_a: Vec<f32>,
+    /// Scratch buffer for the double-buffered atmosphere update.
+    temp_a_scratch: Vec<f32>,
+    /// Current per-cell surface wind (tangent to the sphere, m·s⁻¹). Prognostic: integrated from the
+    /// momentum balance each step. Seeded from the diagnostic balance on the first [`Sim::advance`].
+    wind: Vec<Vec3>,
+    /// Scratch buffer for the double-buffered wind update.
+    wind_scratch: Vec<Vec3>,
+    /// Current per-cell temperature gradient (tangent, K·m⁻¹), recomputed each step and shared by
+    /// the wind's pressure-gradient force.
+    grad: Vec<Vec3>,
+    /// Whether [`wind`] has been seeded from the diagnostic balance yet.
+    wind_seeded: bool,
 }
 
 impl Sim {
@@ -106,6 +215,13 @@ impl Sim {
             crust: Crust::empty(),
             temp: vec![initial_temp; n],
             scratch: vec![initial_temp; n],
+            // Atmosphere starts a bit cooler than the surface (it sits above it).
+            temp_a: vec![initial_temp - 20.0; n],
+            temp_a_scratch: vec![initial_temp - 20.0; n],
+            wind: vec![Vec3::ZERO; n],
+            wind_scratch: vec![Vec3::ZERO; n],
+            grad: vec![Vec3::ZERO; n],
+            wind_seeded: false,
         }
     }
 
@@ -116,14 +232,25 @@ impl Sim {
         self.crust = Crust::generate(grid, &self.terrain, seed);
     }
 
-    /// Current per-cell temperatures (K).
+    /// Current per-cell surface temperatures (K).
     pub fn temperatures(&self) -> &[f32] {
         &self.temp
+    }
+
+    /// Current per-cell atmosphere-layer temperatures (K).
+    pub fn atmosphere_temperatures(&self) -> &[f32] {
+        &self.temp_a
     }
 
     /// Per-cell surface elevation (m relative to sea level; negative = ocean floor).
     pub fn elevations(&self) -> &[f32] {
         &self.crust.elevation
+    }
+
+    /// Current per-cell surface wind (tangent to the sphere, m·s⁻¹). All zero until the first
+    /// [`Sim::advance`] has run.
+    pub fn winds(&self) -> &[Vec3] {
+        &self.wind
     }
 
     /// Unit direction toward the sun in the planet's frame, at the given sim time.
@@ -147,16 +274,49 @@ impl Sim {
         while remaining > 0.0 {
             let dt = remaining.min(MAX_SUBSTEP);
             let sun = self.sun_direction(self.time);
+
+            // The single equator-to-pole gradient factor scales both the belts and the storm-track
+            // eddy diffusivity; compute it (and the temperature gradient that drives the wind's
+            // pressure force) once and share.
+            let gradient = wind::gradient_factor(grid, &self.temp);
+            self.grad = wind::gradients(grid, &self.temp, self.climate.planet_radius);
+
+            // Seed the prognostic wind from the diagnostic balance the first time, so it starts in a
+            // sensible state rather than from rest.
+            if !self.wind_seeded {
+                wind::compute(grid, &self.climate, gradient, &self.grad, &mut self.wind);
+                self.wind_seeded = true;
+            }
+
+            // Integrate the wind one step (momentum balance: advection + Coriolis + pressure +
+            // belt relaxation + viscosity), then swap it in.
+            wind::step(
+                grid,
+                &self.climate,
+                gradient,
+                &self.grad,
+                dt,
+                &self.wind,
+                &mut self.wind_scratch,
+            );
+            std::mem::swap(&mut self.wind, &mut self.wind_scratch);
+
             temperature::step(
                 grid,
                 &self.climate,
                 sun,
                 dt,
                 TEMP_FLOOR,
+                gradient,
                 &self.temp,
+                &self.temp_a,
+                &self.wind,
+                &self.grad,
                 &mut self.scratch,
+                &mut self.temp_a_scratch,
             );
             std::mem::swap(&mut self.temp, &mut self.scratch);
+            std::mem::swap(&mut self.temp_a, &mut self.temp_a_scratch);
             self.time += dt as f64;
             remaining -= dt;
         }
@@ -187,6 +347,15 @@ mod tests {
         let g = Grid::new(600);
         let mut climate = Climate::default();
         climate.diffusivity = 0.0;
+        // Disable all lateral transport so the most-lit cell reaches *pure* radiative equilibrium.
+        climate.eddy_diffusivity = 0.0;
+        climate.trade_wind_speed = 0.0;
+        climate.meridional_wind_speed = 0.0;
+        climate.geostrophic_coeff = 0.0;
+        // Disable the atmosphere too (greenhouse + convection) so the surface reaches the bare
+        // σT⁴ = absorbed equilibrium this test checks.
+        climate.atm_emissivity = 0.0;
+        climate.convection_coeff = 0.0;
         climate.day_seconds = 1.0e12; // effectively frozen sun
         climate.year_seconds = 1.0e15;
         let mut sim = Sim::new(g.n, climate, 200.0);
@@ -215,14 +384,18 @@ mod tests {
 
     #[test]
     fn diffusion_substep_is_stable() {
-        // Explicit-Euler diffusion is stable when dt·D·max(Σⱼwᵢⱼ)/C < 1 (well under 2).
+        // Explicit-Euler diffusion is stable when dt·D·max(Σⱼwᵢⱼ)/C < 1 (well under 2). The peak
+        // conductance is the base diffusivity plus the storm-track eddy term at its strongest:
+        // `eddy_diffusivity` × the maximum gradient factor (clamped to 2.0) × the storm-band peak
+        // (1.0). Sizing the substep against this worst case keeps every cell stable.
         let g = Grid::new(8000);
         let c = Climate::default();
         let max_wsum = (0..g.n)
             .map(|i| g.neighbor_weights(i).iter().sum::<f32>())
             .fold(0.0f32, f32::max);
-        let factor = MAX_SUBSTEP * c.diffusivity * max_wsum / c.heat_capacity;
-        assert!(factor < 1.0, "diffusion CFL factor {factor} (max Σw = {max_wsum}) is unstable");
+        let max_d = c.diffusivity + c.eddy_diffusivity * 2.0;
+        let factor = MAX_SUBSTEP * max_d * max_wsum / c.heat_capacity;
+        assert!(factor < 1.0, "diffusion CFL factor {factor} (max Σw = {max_wsum}, D = {max_d}) is unstable");
     }
 
     #[test]

@@ -31,6 +31,9 @@ pub struct Grid {
     pub adj: Vec<u32>,
     /// Per-edge diffusion conductance (shared-edge arc length / center-to-center arc length).
     pub adj_weight: Vec<f32>,
+    /// Per-edge center-to-center great-circle distance (radians), parallel to `adj`. Precomputed so
+    /// the per-step kernels (gradients, wind advection) need not recompute it.
+    pub adj_dist: Vec<f32>,
 
     // --- CSR Voronoi cell polygons (for rendering): ring of cell `i` is
     //     ring_verts[ring_start[i]..ring_start[i+1]] ---
@@ -116,6 +119,7 @@ impl Grid {
         let mut adj_start = Vec::with_capacity(n + 1);
         let mut adj = Vec::new();
         let mut adj_weight = Vec::new();
+        let mut adj_dist = Vec::new();
         adj_start.push(0u32);
         for i in 0..n {
             for &j in &tess.neighbors[i] {
@@ -142,11 +146,23 @@ impl Grid {
                 };
                 adj.push(j as u32);
                 adj_weight.push(weight);
+                adj_dist.push(dist);
             }
             adj_start.push(adj.len() as u32);
         }
 
-        Grid { n, centers, lonlat_deg, areas, adj_start, adj, adj_weight, ring_start, ring_verts }
+        Grid {
+            n,
+            centers,
+            lonlat_deg,
+            areas,
+            adj_start,
+            adj,
+            adj_weight,
+            adj_dist,
+            ring_start,
+            ring_verts,
+        }
     }
 
     /// Neighbor indices of cell `i`.
@@ -157,6 +173,11 @@ impl Grid {
     /// Per-edge conductance weights for cell `i` (parallel to [`Self::neighbors`]).
     pub fn neighbor_weights(&self, i: usize) -> &[f32] {
         &self.adj_weight[self.adj_start[i] as usize..self.adj_start[i + 1] as usize]
+    }
+
+    /// Per-edge center-to-center distances (radians) for cell `i` (parallel to [`Self::neighbors`]).
+    pub fn neighbor_dists(&self, i: usize) -> &[f32] {
+        &self.adj_dist[self.adj_start[i] as usize..self.adj_start[i + 1] as usize]
     }
 
     /// Index of the cell whose center is closest (greatest angular proximity) to `dir`.

@@ -43,6 +43,7 @@ struct View {
     show_sunlight: bool,
     show_graticule: bool,
     show_motion: bool,
+    show_wind: bool,
     /// Cell highlighted by the cursor hovering this view, if any.
     highlight: Option<u32>,
 }
@@ -76,6 +77,10 @@ pub struct Renderer {
     arrow_buf: wgpu::Buffer,
     arrow_capacity: u32,
     arrow_count: u32,
+    /// Surface-wind arrow field (line list), refreshed each tick, toggled per view.
+    wind_arrow_pipeline: wgpu::RenderPipeline,
+    wind_arrow_buf: wgpu::Buffer,
+    wind_arrow_count: u32,
     views: Vec<View>,
 }
 
@@ -481,6 +486,58 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- Wind-arrow pipeline: identical to the plate-motion arrows but a distinct (cyan)
+        // fragment color, so the two vector fields read apart when both overlays are on. ---
+        let wind_arrow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wind-arrow-pipeline"),
+            layout: Some(&marker_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_marker"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: (3 * std::mem::size_of::<f32>()) as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &marker_attrs,
+                }],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_wind_arrow"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let wind_arrow_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wind-arrow-verts"),
+            size: (ARROW_CAPACITY as usize * 3 * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // --- Per-view resources ---
         let default_layers = [Layer::Temperature, Layer::Temperature];
         let mut views = Vec::with_capacity(2);
@@ -523,6 +580,7 @@ impl Renderer {
                 show_sunlight: true,
                 show_graticule: true,
                 show_motion: false,
+                show_wind: false,
                 highlight: None,
             });
         }
@@ -550,6 +608,9 @@ impl Renderer {
             arrow_buf,
             arrow_capacity: ARROW_CAPACITY,
             arrow_count: 0,
+            wind_arrow_pipeline,
+            wind_arrow_buf,
+            wind_arrow_count: 0,
             views,
         })
     }
@@ -576,6 +637,7 @@ impl Renderer {
                 "sunlight" => v.show_sunlight = enabled,
                 "graticule" => v.show_graticule = enabled,
                 "motion" => v.show_motion = enabled,
+                "wind" => v.show_wind = enabled,
                 _ => {}
             }
         }
@@ -625,6 +687,16 @@ impl Renderer {
         self.queue
             .write_buffer(&self.arrow_buf, 0, bytemuck::cast_slice(&flat));
         self.arrow_count = n as u32;
+    }
+
+    /// Upload the surface-wind arrow field (line-list world positions). Refreshed each tick from
+    /// the live wind field; drawn per view when the wind overlay is on.
+    pub fn set_wind_arrows(&mut self, points: &[Vec3]) {
+        let n = points.len().min(self.arrow_capacity as usize);
+        let flat: Vec<f32> = points[..n].iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+        self.queue
+            .write_buffer(&self.wind_arrow_buf, 0, bytemuck::cast_slice(&flat));
+        self.wind_arrow_count = n as u32;
     }
 
     pub fn aspect(&self, view: usize) -> f32 {
@@ -720,6 +792,14 @@ impl Renderer {
                     pass.set_bind_group(0, &v.camera_bind_group, &[]);
                     pass.set_vertex_buffer(0, self.arrow_buf.slice(..));
                     pass.draw(0..self.arrow_count, 0..1);
+                }
+
+                // Surface-wind arrows, drawn on any view with the wind overlay enabled.
+                if v.show_wind && self.wind_arrow_count > 1 {
+                    pass.set_pipeline(&self.wind_arrow_pipeline);
+                    pass.set_bind_group(0, &v.camera_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.wind_arrow_buf.slice(..));
+                    pass.draw(0..self.wind_arrow_count, 0..1);
                 }
 
                 // The zoom-footprint outline is drawn only on the globe view (index 0).
