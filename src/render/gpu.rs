@@ -44,6 +44,7 @@ struct View {
     show_graticule: bool,
     show_motion: bool,
     show_wind: bool,
+    show_wind_hi: bool,
     /// Cell highlighted by the cursor hovering this view, if any.
     highlight: Option<u32>,
 }
@@ -68,6 +69,10 @@ pub struct Renderer {
     /// Per-cell elevation in metres (static after terrain generation); the elevation layer's data.
     elev_buf: wgpu::Buffer,
     elev_bind_group: wgpu::BindGroup,
+    /// Per-cell atmosphere fields (vec4: T_l, T_u, convective flux H, _), refreshed each tick; the
+    /// data for the lower/upper atmosphere-temperature and convection layers.
+    aux_buf: wgpu::Buffer,
+    aux_bind_group: wgpu::BindGroup,
     marker_pipeline: wgpu::RenderPipeline,
     marker_buf: wgpu::Buffer,
     marker_capacity: u32,
@@ -81,6 +86,10 @@ pub struct Renderer {
     wind_arrow_pipeline: wgpu::RenderPipeline,
     wind_arrow_buf: wgpu::Buffer,
     wind_arrow_count: u32,
+    /// Upper-layer wind arrow field (line list), refreshed each tick, toggled per view. Magenta.
+    wind_hi_arrow_pipeline: wgpu::RenderPipeline,
+    wind_hi_arrow_buf: wgpu::Buffer,
+    wind_hi_arrow_count: u32,
     views: Vec<View>,
 }
 
@@ -245,6 +254,10 @@ impl Renderer {
             label: Some("elev-bgl"),
             entries: &[storage_bgl_entry],
         });
+        let aux_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("aux-bgl"),
+            entries: &[storage_bgl_entry],
+        });
 
         // --- Shared geometry + per-cell data ---
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -314,6 +327,22 @@ impl Renderer {
                 resource: elev_buf.as_entire_binding(),
             }],
         });
+        // Per-cell atmosphere fields (vec4<f32>: T_l, T_u, convective flux H, _). Refreshed each
+        // tick; zero-filled until the first upload so the buffer is always bound and pipeline valid.
+        let aux_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("aux-data"),
+            size: (n_cells.max(1) * std::mem::size_of::<[f32; 4]>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let aux_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("aux-bg"),
+            layout: &aux_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: aux_buf.as_entire_binding(),
+            }],
+        });
 
         // --- Pipeline ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -328,6 +357,7 @@ impl Renderer {
                 Some(&plate_bgl),
                 Some(&center_bgl),
                 Some(&elev_bgl),
+                Some(&aux_bgl),
             ],
             immediate_size: 0,
         });
@@ -538,6 +568,58 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // --- Upper-wind-arrow pipeline: identical to the surface wind arrows but a magenta
+        // fragment color, so the two wind layers read apart when both overlays are on. ---
+        let wind_hi_arrow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wind-hi-arrow-pipeline"),
+            layout: Some(&marker_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_marker"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: (3 * std::mem::size_of::<f32>()) as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &marker_attrs,
+                }],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_wind_hi_arrow"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let wind_hi_arrow_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wind-hi-arrow-verts"),
+            size: (ARROW_CAPACITY as usize * 3 * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // --- Per-view resources ---
         let default_layers = [Layer::Temperature, Layer::Temperature];
         let mut views = Vec::with_capacity(2);
@@ -581,6 +663,7 @@ impl Renderer {
                 show_graticule: true,
                 show_motion: false,
                 show_wind: false,
+                show_wind_hi: false,
                 highlight: None,
             });
         }
@@ -600,6 +683,8 @@ impl Renderer {
             center_bind_group,
             elev_buf,
             elev_bind_group,
+            aux_buf,
+            aux_bind_group,
             marker_pipeline,
             marker_buf,
             marker_capacity: MARKER_CAPACITY,
@@ -611,6 +696,9 @@ impl Renderer {
             wind_arrow_pipeline,
             wind_arrow_buf,
             wind_arrow_count: 0,
+            wind_hi_arrow_pipeline,
+            wind_hi_arrow_buf,
+            wind_hi_arrow_count: 0,
             views,
         })
     }
@@ -638,6 +726,7 @@ impl Renderer {
                 "graticule" => v.show_graticule = enabled,
                 "motion" => v.show_motion = enabled,
                 "wind" => v.show_wind = enabled,
+                "wind_hi" => v.show_wind_hi = enabled,
                 _ => {}
             }
         }
@@ -679,6 +768,21 @@ impl Renderer {
             .write_buffer(&self.elev_buf, 0, bytemuck::cast_slice(elev));
     }
 
+    /// Upload the per-cell atmosphere fields — lower/upper layer temperatures `T_l`/`T_u` (K) and
+    /// the surface convective flux H (W·m⁻²) — interleaved as a `vec4` per cell (4th lane unused),
+    /// read by the atmosphere-temperature and convection layers. Refreshed each tick. The three
+    /// slices must be the same length.
+    pub fn upload_atmosphere(&self, lower: &[f32], upper: &[f32], conv: &[f32]) {
+        let interleaved: Vec<f32> = lower
+            .iter()
+            .zip(upper.iter())
+            .zip(conv.iter())
+            .flat_map(|((&tl, &tu), &h)| [tl, tu, h, 0.0])
+            .collect();
+        self.queue
+            .write_buffer(&self.aux_buf, 0, bytemuck::cast_slice(&interleaved));
+    }
+
     /// Upload the plate-motion arrow field (line-list world positions). Static after generation;
     /// drawn per view when the motion overlay is on.
     pub fn set_arrows(&mut self, points: &[Vec3]) {
@@ -697,6 +801,16 @@ impl Renderer {
         self.queue
             .write_buffer(&self.wind_arrow_buf, 0, bytemuck::cast_slice(&flat));
         self.wind_arrow_count = n as u32;
+    }
+
+    /// Upload the upper-layer wind arrow field (line-list world positions). Refreshed each tick from
+    /// the live upper wind; drawn per view when the upper-wind overlay is on.
+    pub fn set_upper_wind_arrows(&mut self, points: &[Vec3]) {
+        let n = points.len().min(self.arrow_capacity as usize);
+        let flat: Vec<f32> = points[..n].iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+        self.queue
+            .write_buffer(&self.wind_hi_arrow_buf, 0, bytemuck::cast_slice(&flat));
+        self.wind_hi_arrow_count = n as u32;
     }
 
     pub fn aspect(&self, view: usize) -> f32 {
@@ -783,6 +897,7 @@ impl Renderer {
                 pass.set_bind_group(2, &self.plate_bind_group, &[]);
                 pass.set_bind_group(3, &self.center_bind_group, &[]);
                 pass.set_bind_group(4, &self.elev_bind_group, &[]);
+                pass.set_bind_group(5, &self.aux_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
                 pass.draw(0..self.vertex_count, 0..1);
 
@@ -800,6 +915,14 @@ impl Renderer {
                     pass.set_bind_group(0, &v.camera_bind_group, &[]);
                     pass.set_vertex_buffer(0, self.wind_arrow_buf.slice(..));
                     pass.draw(0..self.wind_arrow_count, 0..1);
+                }
+
+                // Upper-layer wind arrows (magenta), drawn when the upper-wind overlay is enabled.
+                if v.show_wind_hi && self.wind_hi_arrow_count > 1 {
+                    pass.set_pipeline(&self.wind_hi_arrow_pipeline);
+                    pass.set_bind_group(0, &v.camera_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.wind_hi_arrow_buf.slice(..));
+                    pass.draw(0..self.wind_hi_arrow_count, 0..1);
                 }
 
                 // The zoom-footprint outline is drawn only on the globe view (index 0).

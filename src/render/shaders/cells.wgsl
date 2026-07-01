@@ -8,8 +8,9 @@ struct Camera {
     eye: vec4<f32>,      // world-space camera position (xyz)
     sun: vec4<f32>,      // direction to the sun in the planet frame (xyz)
     params: vec4<f32>,   // x = data min, y = data max, z = show sunlight, w = show graticule
-    highlight: vec4<f32>,// x = hovered cell index (or -1), y = layer index (0 temp, 1 plates,
-                         // 2 elevation), z = projection (0 sphere, 1 Winkel Tripel map)
+    highlight: vec4<f32>,// x = hovered cell index (or -1), y = layer index (0 surface temp, 1 plates,
+                         // 2 elevation, 3 lower-atm temp, 4 upper-atm temp, 5 convection),
+                         // z = projection (0 sphere, 1 Winkel Tripel map)
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -19,6 +20,9 @@ struct Camera {
 @group(3) @binding(0) var<storage, read> cell_center: array<vec2<f32>>;
 // Per-cell surface elevation in metres relative to sea level (static after terrain generation).
 @group(4) @binding(0) var<storage, read> elev_data: array<f32>;
+// Per-cell atmosphere fields, refreshed each tick: x = lower-layer temp T_l (K), y = upper-layer
+// temp T_u (K), z = surface convective heat flux H (W·m⁻²), w = unused.
+@group(5) @binding(0) var<storage, read> aux_data: array<vec4<f32>>;
 
 const PI: f32 = 3.141592653589793;
 
@@ -43,6 +47,9 @@ struct VsOut {
     @location(3) @interpolate(flat) cell: u32,
     @location(4) @interpolate(flat) plate: u32,
     @location(5) @interpolate(flat) elev: f32,
+    @location(6) @interpolate(flat) atm_l: f32,
+    @location(7) @interpolate(flat) atm_u: f32,
+    @location(8) @interpolate(flat) conv: f32,
 };
 
 @vertex
@@ -68,6 +75,9 @@ fn vs_main(@location(0) pos: vec3<f32>, @location(1) cell: u32) -> VsOut {
     out.cell = cell;
     out.plate = plate_data[cell];
     out.elev = elev_data[cell];
+    out.atm_l = aux_data[cell].x;
+    out.atm_u = aux_data[cell].y;
+    out.conv = aux_data[cell].z;
     return out;
 }
 
@@ -149,17 +159,23 @@ fn grid_line(value_deg: f32, spacing: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Layer 0 = continuous data through the colormap; 1 = categorical plate palette; 2 = elevation
-    // through the hypsometric ramp.
+    // Layer index (rounded from the float uniform): 0 = surface temp, 1 = plates (categorical),
+    // 2 = elevation (hypsometric), 3 = lower-atm temp, 4 = upper-atm temp, 5 = convective flux —
+    // the continuous atmosphere/convection layers share the temp colormap over their own `range()`.
     let lo = camera.params.x;
     let hi = camera.params.y;
+    let layer = i32(camera.highlight.y + 0.5);
     var color: vec3<f32>;
-    if (camera.highlight.y > 1.5) {
-        color = hypsometric(in.elev, lo, hi);
-    } else if (camera.highlight.y > 0.5) {
+    if (layer == 1) {
         color = plate_color(in.plate);
+    } else if (layer == 2) {
+        color = hypsometric(in.elev, lo, hi);
     } else {
-        let t = (in.value - lo) / max(hi - lo, 1e-3);
+        var v = in.value;          // layer 0: surface temperature
+        if (layer == 3) { v = in.atm_l; }
+        else if (layer == 4) { v = in.atm_u; }
+        else if (layer == 5) { v = in.conv; }
+        let t = (v - lo) / max(hi - lo, 1e-3);
         color = colormap(t);
     }
 
@@ -229,4 +245,12 @@ fn fs_arrow() -> @location(0) vec4<f32> {
 @fragment
 fn fs_wind_arrow() -> @location(0) vec4<f32> {
     return vec4<f32>(0.25, 0.95, 0.95, 1.0); // cyan
+}
+
+// --- Upper-layer wind arrows (line list, shares vs_marker; magenta, distinct from the cyan
+// surface wind so the two layers read apart when both overlays are on). ---
+
+@fragment
+fn fs_wind_hi_arrow() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.95, 0.25, 0.95, 1.0); // magenta
 }

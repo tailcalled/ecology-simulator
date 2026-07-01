@@ -50,6 +50,13 @@ pub enum Layer {
     Plates,
     /// Surface elevation through a hypsometric (bathymetry/topography) colormap.
     Elevation,
+    /// Lower atmosphere-layer temperature `T_l`, through the temperature colormap.
+    AtmosphereTempLower,
+    /// Upper atmosphere-layer temperature `T_u`, through the temperature colormap.
+    AtmosphereTempUpper,
+    /// Surface convective heat flux H (W·m⁻²) — the venting into the atmosphere; lights up the
+    /// convergence/convection zones (ITCZ).
+    Convection,
 }
 
 impl Layer {
@@ -59,6 +66,9 @@ impl Layer {
             "temperature" => Some(Layer::Temperature),
             "plates" => Some(Layer::Plates),
             "elevation" => Some(Layer::Elevation),
+            "atmosphere_lower" => Some(Layer::AtmosphereTempLower),
+            "atmosphere_upper" => Some(Layer::AtmosphereTempUpper),
+            "convection" => Some(Layer::Convection),
             _ => None,
         }
     }
@@ -69,6 +79,9 @@ impl Layer {
             Layer::Temperature => 0,
             Layer::Plates => 1,
             Layer::Elevation => 2,
+            Layer::AtmosphereTempLower => 3,
+            Layer::AtmosphereTempUpper => 4,
+            Layer::Convection => 5,
         }
     }
 
@@ -81,6 +94,13 @@ impl Layer {
             Layer::Plates => (0.0, 1.0),
             // Metres: deepest trench to highest peak; the colormap pivots at 0 (sea level).
             Layer::Elevation => (-8000.0, 6000.0),
+            // The lower atmosphere sits ~Γ below the surface; a window centered cooler than the
+            // surface temp so its structure isn't washed into the blue end.
+            Layer::AtmosphereTempLower => (210.0, 290.0),
+            // The upper atmosphere is colder still (~2Γ below the surface).
+            Layer::AtmosphereTempUpper => (190.0, 260.0),
+            // W·m⁻²: 0 (no convection) to a vigorous tropical/daytime venting flux.
+            Layer::Convection => (0.0, 120.0),
         }
     }
 }

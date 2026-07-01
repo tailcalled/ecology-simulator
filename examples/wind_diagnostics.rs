@@ -126,29 +126,82 @@ fn main() {
     println!();
     println!("Expected Earth pattern: easterly 0–30° (trades), westerly 30–60°, easterly 60–90°.");
 
-    // --- Temporal variation: does the wind evolve as the day/night warm spot moves? ---
-    let before: Vec<glam::Vec3> = sim.winds().to_vec();
+    // --- Upper layer: subtropical jet (zonal) + overturning closure (meridional vs surface). ---
+    // The upper-level zonal mean should show a westerly jet peaking near 30°, and the upper
+    // meridional flow should be *opposite* the surface in every band (closed overturning cells).
+    let mut up_zonal = [0.0f64; BANDS];
+    let mut up_merid = [0.0f64; BANDS];
+    let mut sf_merid = [0.0f64; BANDS];
+    let winds_hi = sim.winds_hi();
+    for i in 0..grid.n {
+        let lat = grid.lonlat_deg[i].y.abs();
+        let b = ((lat / 10.0) as usize).min(BANDS - 1);
+        let a = grid.areas[i] as f64;
+        let (east, north) = east_north(grid.centers[i]);
+        up_zonal[b] += winds_hi[i].dot(east) as f64 * a;
+        up_merid[b] += winds_hi[i].dot(north) as f64 * a;
+        sf_merid[b] += winds[i].dot(north) as f64 * a;
+    }
+    println!();
+    println!(" |lat| band | upper zonal (jet)        | surface merid | upper merid | overturning");
+    println!("-----------+--------------------------+---------------+-------------+------------");
+    for b in 0..BANDS {
+        if band_area[b] <= 0.0 {
+            continue;
+        }
+        let inv = 1.0 / band_area[b];
+        let uz = (up_zonal[b] * inv) as f32;
+        let sm = (sf_merid[b] * inv) as f32;
+        let um = (up_merid[b] * inv) as f32;
+        let dir = if uz >= 0.0 { "westerly →" } else { "easterly ←" };
+        // Opposed signs = a closed cell (surface and upper branches return each other's mass).
+        let closed = if sm * um < 0.0 { "✓ opposed" } else { "— same" };
+        println!(
+            "  {:2}–{:2}°   | {:+5.1} m/s  {:10} | {:+6.1} m/s   | {:+6.1} m/s | {}",
+            b * 10,
+            b * 10 + 10,
+            uz,
+            dir,
+            sm,
+            um,
+            closed,
+        );
+    }
+    println!();
+    println!("Expected: westerly subtropical jet peaking ~30°; upper meridional opposite the surface.");
+
+    // --- Temporal variation: do the winds evolve as the day/night warm spot moves? Measured for
+    // both layers — the upper layer's variation is how "lively" the magenta arrows look. ---
+    let surf_before: Vec<glam::Vec3> = sim.winds().to_vec();
+    let upper_before: Vec<glam::Vec3> = sim.winds_hi().to_vec();
     let day = sim.climate.day_seconds;
     // advance a quarter day in hourly steps (a full day would return the sun — and the periodic
     // diurnal wind — to its start, masking the within-day change). advance re-diagnoses the wind.
     for _ in 0..6 {
         sim.advance(&grid, day / 24.0);
     }
-    let after = sim.winds();
-    let (mut dsum, mut bsum, mut area) = (0.0f64, 0.0f64, 0.0f64);
-    for i in 0..grid.n {
-        let a = grid.areas[i] as f64;
-        dsum += (after[i] - before[i]).length() as f64 * a;
-        bsum += before[i].length() as f64 * a;
-        area += a;
-    }
-    let mean_change = dsum / area;
-    let mean_speed = bsum / area;
+    let variation = |before: &[glam::Vec3], after: &[glam::Vec3]| -> (f64, f64) {
+        let (mut dsum, mut bsum, mut area) = (0.0f64, 0.0f64, 0.0f64);
+        for i in 0..grid.n {
+            let a = grid.areas[i] as f64;
+            dsum += (after[i] - before[i]).length() as f64 * a;
+            bsum += before[i].length() as f64 * a;
+            area += a;
+        }
+        (dsum / area, bsum / area)
+    };
+    let (s_change, s_speed) = variation(&surf_before, sim.winds());
+    let (u_change, u_speed) = variation(&upper_before, sim.winds_hi());
     println!();
     println!(
-        "Temporal variation over ¼ day: mean |Δwind| = {:.2} m/s  ({:.0}% of mean speed {:.2} m/s)",
-        mean_change,
-        100.0 * mean_change / mean_speed,
-        mean_speed,
+        "Temporal variation over ¼ day (turbulence = lively arrows):\n  \
+         surface: mean |Δwind| = {:.2} m/s  ({:.0}% of mean speed {:.2} m/s)\n  \
+         upper:   mean |Δwind| = {:.2} m/s  ({:.0}% of mean speed {:.2} m/s)",
+        s_change,
+        100.0 * s_change / s_speed,
+        s_speed,
+        u_change,
+        100.0 * u_change / u_speed,
+        u_speed,
     );
 }

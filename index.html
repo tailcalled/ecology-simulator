@@ -78,6 +78,9 @@
             <div class="menu">
               <div class="sep">Layer</div>
               <label><input type="radio" name="layer0" class="layer" data-view="0" value="temperature" checked /> Temperature</label>
+              <label><input type="radio" name="layer0" class="layer" data-view="0" value="atmosphere_lower" /> Atmosphere (lower)</label>
+              <label><input type="radio" name="layer0" class="layer" data-view="0" value="atmosphere_upper" /> Atmosphere (upper)</label>
+              <label><input type="radio" name="layer0" class="layer" data-view="0" value="convection" /> Convection</label>
               <label><input type="radio" name="layer0" class="layer" data-view="0" value="elevation" /> Elevation</label>
               <label><input type="radio" name="layer0" class="layer" data-view="0" value="plates" /> Plates</label>
               <div class="sep">Projection</div>
@@ -87,7 +90,8 @@
               <label><input type="checkbox" class="ov" data-view="0" data-ov="sunlight" checked /> Sunlight</label>
               <label><input type="checkbox" class="ov" data-view="0" data-ov="graticule" checked /> Lat/long lines</label>
               <label><input type="checkbox" class="ov" data-view="0" data-ov="motion" /> Plate motion</label>
-              <label><input type="checkbox" class="ov" data-view="0" data-ov="wind" /> Wind</label>
+              <label><input type="checkbox" class="ov" data-view="0" data-ov="wind" /> Wind (surface)</label>
+              <label><input type="checkbox" class="ov" data-view="0" data-ov="wind_hi" /> Wind (upper)</label>
             </div>
           </details>
         </header>
@@ -103,13 +107,17 @@
             <div class="menu">
               <div class="sep">Layer</div>
               <label><input type="radio" name="layer1" class="layer" data-view="1" value="temperature" checked /> Temperature</label>
+              <label><input type="radio" name="layer1" class="layer" data-view="1" value="atmosphere_lower" /> Atmosphere (lower)</label>
+              <label><input type="radio" name="layer1" class="layer" data-view="1" value="atmosphere_upper" /> Atmosphere (upper)</label>
+              <label><input type="radio" name="layer1" class="layer" data-view="1" value="convection" /> Convection</label>
               <label><input type="radio" name="layer1" class="layer" data-view="1" value="elevation" /> Elevation</label>
               <label><input type="radio" name="layer1" class="layer" data-view="1" value="plates" /> Plates</label>
               <div class="sep">Overlays</div>
               <label><input type="checkbox" class="ov" data-view="1" data-ov="sunlight" checked /> Sunlight</label>
               <label><input type="checkbox" class="ov" data-view="1" data-ov="graticule" checked /> Lat/long lines</label>
               <label><input type="checkbox" class="ov" data-view="1" data-ov="motion" /> Plate motion</label>
-              <label><input type="checkbox" class="ov" data-view="1" data-ov="wind" /> Wind</label>
+              <label><input type="checkbox" class="ov" data-view="1" data-ov="wind" /> Wind (surface)</label>
+              <label><input type="checkbox" class="ov" data-view="1" data-ov="wind_hi" /> Wind (upper)</label>
             </div>
           </details>
         </header>

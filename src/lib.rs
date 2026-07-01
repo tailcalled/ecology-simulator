@@ -339,11 +339,20 @@ mod wasm {
             engine.globe.azimuth += AUTO_ROTATE * dt_real;
 
             engine.renderer.upload_cell_data(engine.sim.temperatures());
+            // Lower/upper atmosphere temperatures + convective flux for the atmosphere/convection layers.
+            engine.renderer.upload_atmosphere(
+                engine.sim.lower_atmosphere_temperatures(),
+                engine.sim.upper_atmosphere_temperatures(),
+                engine.sim.convection(),
+            );
 
-            // Refresh the surface-wind arrow field from the live wind (diagnosed each step).
+            // Refresh both wind arrow fields from the live winds (integrated each step).
             let wind_arrows =
                 build_arrows_at(&engine.grid, engine.sim.winds(), &engine.arrow_samples);
             engine.renderer.set_wind_arrows(&wind_arrows);
+            let wind_hi_arrows =
+                build_arrows_at(&engine.grid, engine.sim.winds_hi(), &engine.arrow_samples);
+            engine.renderer.set_upper_wind_arrows(&wind_hi_arrows);
 
             let sun = engine.sim.sun_direction(engine.sim.time);
 

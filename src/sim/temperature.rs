@@ -1,28 +1,35 @@
-//! The per-cell two-layer energy-balance kernel — the hot loop, run in parallel with rayon.
+//! The per-cell three-body energy-balance kernel — the hot loop, run in parallel with rayon.
 //!
-//! Two coupled temperatures evolve: the surface `T_s` and the atmosphere `T_a`, exchanging energy
-//! by grey-body radiation and convection. Per cell, over one step `dt` (σ = Stefan–Boltzmann,
-//! ε_a = atmospheric IR emissivity):
+//! Three temperatures evolve per cell: the surface `T_s`, the **lower** atmosphere `T_l`, and the
+//! **upper** atmosphere `T_u`, exchanging energy by grey-body longwave radiation and a convective
+//! chain. The atmosphere is two stacked grey slabs (emissivities ε_L, ε_U), each absorbing a
+//! fraction of the longwave beam passing through it and re-emitting σεT⁴ both up and down. With the
+//! beam bookkeeping done (τ = 1−ε per layer):
 //!
-//!   surface:     C_s·dT_s/dt = (1−α)S·max(0,n·ŝ) − σT_s⁴ + ε_a·σT_a⁴ − H + diffuse_s ;  −u·∇T_s
-//!   atmosphere:  C_a·dT_a/dt = ε_a·σT_s⁴ + H − 2ε_a·σT_a⁴ + diffuse_a
-//!   convection:  H = κ·(T_s − T_a)                         [sensible-heat flux, the vertical venting]
+//! ```text
+//!   surface:  C_s dT_s/dt = (1−α)S·max(0,n·ŝ) − σT_s⁴ + (τ_L·σε_UT_u⁴ + σε_LT_l⁴) − H_s + dif_s
+//!   lower:    C_L dT_l/dt = ε_L(σT_s⁴ + σε_UT_u⁴) − 2σε_LT_l⁴ + H_s − H_l + dif_l − u·∇T_l
+//!   upper:    C_U dT_u/dt = ε_U(τ_L·σT_s⁴ + σε_LT_l⁴) − 2σε_UT_u⁴ + H_l + dif_u − u_hi·∇T_u
+//!   convection chain:  H_s = κ·max(T_s−T_l−Γ, 0) ,  H_l = κ·max(T_l−T_u−Γ, 0)
+//! ```
 //!
-//! This is a single grey atmospheric slab: it absorbs a fraction ε_a of the surface's thermal
-//! radiation and re-emits σε_a·T_a⁴ both up (to space) and down (back-radiation to the surface),
-//! which is the **greenhouse** — it lifts the surface above its bare-rock emission temperature, so
-//! the old emissivity fudge is gone. The convective flux `H` carries heat up where the surface is
-//! hot (the **venting**, conservative: the surface loses exactly what the air gains), and the
-//! atmosphere's large heat capacity `C_a` buffers the diurnal swing.
+//! Summing the three budgets, the radiative terms collapse to `absorbed − OLR` with
+//! `OLR = τ_U(τ_L σT_s⁴ + σε_LT_l⁴) + σε_UT_u⁴` and the convective fluxes cancel — the scheme
+//! conserves energy by construction, and the cold upper layer plus the per-link lapse threshold Γ
+//! give an emergent vertical structure (surface warmest, upper coldest) and a real **greenhouse**.
 //!
-//! `diffuse_s` carries the storm-track eddy transport that warms the poles (as before); `diffuse_a`
-//! is the atmosphere's freer lateral mixing. Surface heat is advected by the resolved surface wind
-//! in **advective** form `−u·∇T_s` (the flux form's `−T∇·u` would pile heat up unboundedly in
-//! convergence zones — that upward escape is now handled physically by convection into the
-//! atmosphere instead).
+//! Heat is transported laterally by the storm-track eddy conductance (`dif_s`, on `T_s`) and the
+//! atmosphere's freer mixing (`dif_l`/`dif_u`), and **advected**: the *air* rides the winds — `T_l`
+//! the surface wind, `T_u` the upper wind. The surface skin is NOT advected (a sea/ground surface
+//! doesn't blow downwind; horizontal heat reaches it via the advected air through convection). The
+//! per-cell `C_s` (ocean ≫ land) is what damps the diurnal/seasonal swing. Advection uses the
+//! (locally stable) advective form `−u·∇T`; the upper layer subtracts the global-mean tendency
+//! (`adv_u_correction`) so its fast, divergent wind doesn't leak a spurious global drift (the stand-in
+//! for vertical mass compensation). The two layers' opposed overturning winds carrying *different*
+//! temperatures is what lets the circulation transport heat poleward — impossible with a single slab.
 //!
-//! Reads come from the `*_in` snapshots; writes go to the `*_out` scratch buffers. The caller
-//! swaps afterward, so neighbor reads never observe a half-updated step.
+//! Reads come from the `Temps` snapshots; writes go to the `Outs` scratch buffers. The caller swaps
+//! afterward, so neighbor reads never observe a half-updated step.
 
 use glam::Vec3;
 use rayon::prelude::*;
@@ -53,9 +60,33 @@ fn conductance(climate: &Climate, gradient: f32, sin_lat: f32) -> f32 {
     climate.diffusivity + climate.eddy_diffusivity * gradient * storm_track(sin_lat)
 }
 
-/// Advance the surface and atmosphere temperatures one explicit-Euler step. `temp_s`/`temp_a` are
-/// the current fields; `wind` (m·s⁻¹) advects the surface and `grad_t` (K·m⁻¹) is its gradient;
-/// `gradient` is the shared equator-to-pole factor. Results go to `out_s`/`out_a`.
+/// The three current temperature fields (read-only snapshots) the kernel evolves.
+pub struct Temps<'a> {
+    /// Surface temperature `T_s` (K).
+    pub s: &'a [f32],
+    /// Lower atmosphere temperature `T_l` (K).
+    pub l: &'a [f32],
+    /// Upper atmosphere temperature `T_u` (K).
+    pub u: &'a [f32],
+}
+
+/// The output scratch buffers the kernel writes (caller swaps them in afterward).
+pub struct Outs<'a> {
+    /// Next surface temperature.
+    pub s: &'a mut [f32],
+    /// Next lower-atmosphere temperature.
+    pub l: &'a mut [f32],
+    /// Next upper-atmosphere temperature.
+    pub u: &'a mut [f32],
+    /// Surface→lower convective flux H_s (W·m⁻²) for visualization.
+    pub conv: &'a mut [f32],
+}
+
+/// Advance the surface and two atmosphere temperatures one explicit-Euler step. `wind`/`grad_s`
+/// advect the surface and `wind`/`grad_l` the lower layer; `wind_hi`/`grad_u` advect the upper
+/// layer (with `adv_u_correction`, the area-mean of `−u_hi·∇T_u`, subtracted to keep it
+/// energy-conserving). `gradient` is the shared equator-to-pole factor. Results + the surface
+/// convective flux go to `out`.
 #[allow(clippy::too_many_arguments)]
 pub fn step(
     grid: &Grid,
@@ -64,67 +95,100 @@ pub fn step(
     dt: f32,
     temp_floor: f32,
     gradient: f32,
-    temp_s: &[f32],
-    temp_a: &[f32],
+    temps: Temps,
+    heat_cap: &[f32],
     wind: &[Vec3],
-    grad_t: &[Vec3],
-    out_s: &mut [f32],
-    out_a: &mut [f32],
+    grad_l: &[Vec3],
+    wind_hi: &[Vec3],
+    grad_u: &[Vec3],
+    adv_u_correction: f32,
+    out: Outs,
 ) {
     let absorb_coeff = (1.0 - climate.albedo) * climate.solar_constant;
     let sigma = STEFAN_BOLTZMANN;
     let surf_emit = climate.emissivity * sigma;
-    let eps_a = climate.atm_emissivity;
-    let atm_emit = eps_a * sigma;
-    let inv_cs = 1.0 / climate.heat_capacity;
-    let inv_ca = 1.0 / climate.atm_heat_capacity;
+    let eps_l = climate.atm_emissivity_lower;
+    let eps_u = climate.atm_emissivity_upper;
+    let tau_l = 1.0 - eps_l; // lower-layer longwave transmissivity
+    let inv_cl = 1.0 / climate.atm_heat_capacity_lower;
+    let inv_cu = 1.0 / climate.atm_heat_capacity_upper;
     let kappa = climate.convection_coeff;
     let gamma = climate.convection_threshold;
     let atm_d = climate.atm_diffusivity;
 
+    let (Temps { s: temp_s, l: temp_l, u: temp_u }, Outs { s: out_s, l: out_l, u: out_u, conv: out_conv }) =
+        (temps, out);
+
     out_s
         .par_iter_mut()
-        .zip(out_a.par_iter_mut())
+        .zip(out_l.par_iter_mut())
+        .zip(out_u.par_iter_mut())
+        .zip(out_conv.par_iter_mut())
         .enumerate()
-        .for_each(|(i, (ts_out, ta_out))| {
+        .for_each(|(i, (((ts_out, tl_out), tu_out), conv_out))| {
             let ts = temp_s[i];
-            let ta = temp_a[i];
+            let tl = temp_l[i];
+            let tu = temp_u[i];
             let ci = grid.centers[i];
 
             let cos_incidence = ci.dot(sun).max(0.0);
             let absorbed = absorb_coeff * cos_incidence;
-            let ts4 = ts * ts * ts * ts;
-            let ta4 = ta * ta * ta * ta;
-            let surf_up = surf_emit * ts4; // surface thermal emission
-            let atm_ir = atm_emit * ta4; // atmosphere emission (each of up and down)
 
-            // Convective sensible-heat flux, upward, only once the surface is warmer than the air by
-            // more than the lapse threshold — so the air stays ~Γ cooler than the surface and the
-            // greenhouse survives.
-            let h = kappa * (ts - ta - gamma).max(0.0);
+            // Grey-body emissions (per direction for the layers).
+            let b_s = surf_emit * ts * ts * ts * ts;
+            let b_l = eps_l * sigma * tl * tl * tl * tl;
+            let b_u = eps_u * sigma * tu * tu * tu * tu;
 
-            // Lateral transport: surface storm-track eddy conductance; atmosphere's freer mixing.
-            // Edge conductances average the two cells' values so each operator stays conservative.
+            // Net longwave for each body, from the up/down beam bookkeeping (see module docs).
+            let lw_s = (tau_l * b_u + b_l) - b_s;
+            let lw_l = eps_l * (b_s + b_u) - 2.0 * b_l;
+            let lw_u = eps_u * (tau_l * b_s + b_l) - 2.0 * b_u;
+
+            // Convection chain: surface vents into the lower layer, lower vents into the upper, each
+            // only beyond the per-link lapse threshold Γ (keeps each layer cooler than the one below).
+            let h_s = kappa * (ts - tl - gamma).max(0.0);
+            let h_l = kappa * (tl - tu - gamma).max(0.0);
+
+            // Lateral transport: surface storm-track eddy conductance; both atmosphere layers use
+            // the freer atmospheric mixing. Edge conductances average the two cells' values so each
+            // operator stays conservative.
             let ds_i = conductance(climate, gradient, ci.z);
             let neighbors = grid.neighbors(i);
             let weights = grid.neighbor_weights(i);
             let mut diffuse_s = 0.0f32;
-            let mut diffuse_a = 0.0f32;
+            let mut diffuse_l = 0.0f32;
+            let mut diffuse_u = 0.0f32;
             for (k, &j) in neighbors.iter().enumerate() {
                 let j = j as usize;
                 let ds_j = conductance(climate, gradient, grid.centers[j].z);
                 diffuse_s += 0.5 * (ds_i + ds_j) * weights[k] * (temp_s[j] - ts);
-                diffuse_a += atm_d * weights[k] * (temp_a[j] - ta);
+                diffuse_l += atm_d * weights[k] * (temp_l[j] - tl);
+                diffuse_u += atm_d * weights[k] * (temp_u[j] - tu);
             }
 
-            // Surface advection by the resolved wind, −(u·∇T_s); the strong conduction term keeps
-            // this central estimate stable.
-            let advect_s = -wind[i].dot(grad_t[i]);
+            // Advection (advective form; the conduction terms keep the central gradient stable).
+            // Only the AIR is advected — the lower layer by the surface wind, the upper by the upper
+            // wind (with its divergent global drift removed). The surface skin is NOT advected: a
+            // sea/ground surface doesn't blow downwind with the air (its heat moves with ocean
+            // currents, ~100× slower), and advecting a high-`C_s` ocean cell by the full atmospheric
+            // wind is both unphysical and numerically unstable (the advective tendency doesn't shrink
+            // with `C_s` but its stabilizing diffusion does). Horizontal heat reaches the surface via
+            // the advected air (convection) + the storm-track surface diffusion.
+            let advect_l = -wind[i].dot(grad_l[i]);
+            let advect_u = if climate.upper_advection {
+                -wind_hi[i].dot(grad_u[i]) - adv_u_correction
+            } else {
+                0.0
+            };
 
-            let flux_s = absorbed - surf_up + atm_ir - h + diffuse_s;
-            let flux_a = eps_a * surf_up + h - 2.0 * atm_ir + diffuse_a;
+            let flux_s = absorbed + lw_s - h_s + diffuse_s;
+            let flux_l = lw_l + h_s - h_l + diffuse_l;
+            let flux_u = lw_u + h_l + diffuse_u;
 
-            *ts_out = (ts + dt * (flux_s * inv_cs + advect_s)).max(temp_floor);
-            *ta_out = (ta + dt * (flux_a * inv_ca)).max(temp_floor);
+            let inv_cs = 1.0 / heat_cap[i]; // ocean cells (high C_s) barely swing; land swings fast
+            *ts_out = (ts + dt * flux_s * inv_cs).max(temp_floor);
+            *tl_out = (tl + dt * (flux_l * inv_cl + advect_l)).max(temp_floor);
+            *tu_out = (tu + dt * (flux_u * inv_cu + advect_u)).max(temp_floor);
+            *conv_out = h_s;
         });
 }
