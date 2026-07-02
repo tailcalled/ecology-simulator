@@ -45,20 +45,6 @@ const REFERENCE_GRADIENT: f32 = 50.0;
 /// violated, so a transient gradient spike can't blow the sim up.
 const MAX_WIND: f32 = 120.0;
 
-/// Which of the two prognostic wind layers is being integrated. Both share the same momentum
-/// machinery (upwind advection, Coriolis, de-meaned pressure forcing, zonal-mean belt relaxation,
-/// viscosity); they differ only in the belt *target* they relax toward, the surface drag, and the
-/// temperature gradient (`∇T_s` vs `∇T_a`) that drives their eddies — all selected from this flag.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum WindLayer {
-    /// Near-surface wind (the tri-cell trades/westerlies/easterlies). Advects `T_s`.
-    Surface,
-    /// Upper-tropospheric wind (subtropical jet + the overturning's poleward-aloft return branch).
-    /// Advects `T_a`.
-    Upper,
-}
-
-
 /// Orthonormal surface frame at a cell normal `n`: (east, north). `east × north = n` (a
 /// right-handed up/north/east triad). Degenerates at the poles, where the returned directions are
 /// arbitrary but still orthonormal and tangent.
@@ -147,60 +133,61 @@ pub fn gradients(grid: &Grid, field: &[f32], radius: f32) -> Vec<Vec3> {
         .collect()
 }
 
-/// The zonal-mean tri-cell belt wind at a cell, scaled by the climate `gradient` factor.
-///
-/// `sin(6|φ|)` has zeros exactly at the cell boundaries 0°, 30°, 60°, 90° and alternates sign
-/// between them, giving — with the leading minus — easterlies, then westerlies, then easterlies as
-/// `|φ|` climbs. The poleward branch uses the same shape so that within each cell the meridional
-/// surface flow opposes the zonal sign in the way the real overturning does (e.g. equatorward under
-/// the trades), yielding north*easterly* trades.
-fn belt_wind(n: Vec3, east: Vec3, north: Vec3, climate: &Climate, gradient: f32) -> Vec3 {
-    let lat = n.z.clamp(-1.0, 1.0).asin();
-    let shape = (6.0 * lat.abs()).sin();
-    // Eastward component: negative (easterly) in the trade and polar bands.
-    let zonal = -climate.trade_wind_speed * gradient * shape;
-    // Poleward component: equatorward (negative) under the trades, poleward under the westerlies.
-    let poleward = -climate.meridional_wind_speed * gradient * shape * lat.signum();
-    east * zonal + north * poleward
-}
-
 /// Latitude of the subtropical jet maximum (radians ≈ 30°): the poleward edge of the Hadley cell,
 /// where the upper-level westerlies peak.
 const JET_LAT: f32 = std::f32::consts::FRAC_PI_6;
 /// Gaussian half-width (radians ≈ 20°) of the subtropical jet in latitude.
 const JET_WIDTH: f32 = 0.35;
 
-/// The upper-layer belt target: the climatological flow of the **upper troposphere**, the literal
-/// second branch of the overturning the surface belts can't carry on their own.
-///
-///   * **Zonal** — a single westerly **subtropical jet**: a Gaussian in `|φ|` peaking at 30°
-///     ([`JET_LAT`]), the poleward edge of the Hadley cell. Westerly (eastward, positive)
-///     everywhere, unlike the sign-alternating surface belts, because the upper troposphere is
-///     broadly westerly. Earth's jet runs ~25–40 m·s⁻¹.
-///   * **Meridional** — the overturning **return branch**, exactly opposite the surface meridional
-///     flow (`belt_wind`'s `−sin(6|φ|)·signum` becomes `+`): poleward aloft under the trades (the
-///     Hadley return), equatorward aloft in the Ferrel cell. Pairing surface-equatorward with
-///     upper-poleward (and vice-versa) closes the cells and is what carries heat poleward when the
-///     two layers advect `T_s`/`T_a`.
-///
-/// Both scale with the climate `gradient` factor, like the surface belts.
-fn belt_wind_upper(n: Vec3, east: Vec3, north: Vec3, climate: &Climate, gradient: f32) -> Vec3 {
-    let lat = n.z.clamp(-1.0, 1.0).asin();
-    let d = (lat.abs() - JET_LAT) / JET_WIDTH;
-    let zonal = climate.jet_wind_speed * gradient * (-d * d).exp();
-    // Overturning return: opposite sign to the surface meridional branch.
-    let shape = (6.0 * lat.abs()).sin();
-    let poleward = climate.meridional_wind_speed * gradient * shape * lat.signum();
-    east * zonal + north * poleward
+/// Normalized height of wind layer `layer` in an `n_layers`-deep column: 0 at the surface layer, 1
+/// at the top. A single-layer column sits at the surface.
+pub fn layer_height(layer: usize, n_layers: usize) -> f32 {
+    if n_layers <= 1 {
+        0.0
+    } else {
+        layer as f32 / (n_layers - 1) as f32
+    }
 }
 
-/// The belt target for a given layer (surface tri-cell vs upper jet/return). Centralizes the
-/// `WindLayer` switch so [`compute`] and [`step`] stay in lock-step.
-fn belt_for(layer: WindLayer, n: Vec3, east: Vec3, north: Vec3, climate: &Climate, gradient: f32) -> Vec3 {
-    match layer {
-        WindLayer::Surface => belt_wind(n, east, north, climate, gradient),
-        WindLayer::Upper => belt_wind_upper(n, east, north, climate, gradient),
-    }
+/// The zonal-mean belt target for a wind layer at normalized height `h` (0 = surface, 1 = top),
+/// generalizing the two hand-built belts to a column of any depth (scaled by the climate `gradient`
+/// factor). A single vertically-integrated layer cannot *produce* the Hadley/Ferrel/Polar
+/// overturning, so its zonal-mean structure is imposed here as a vertical profile:
+///
+///   * **Zonal** blends the surface **tri-cell** profile at `h=0` (`−sin(6|φ|)`: easterly trades
+///     0–30°, mid-latitude westerlies 30–60°, polar easterlies 60–90°) into the upper **subtropical
+///     jet** at `h=1` (a single westerly Gaussian peaking at [`JET_LAT`] ≈ 30°).
+///   * **Meridional** is the overturning branch, ramped linearly from equatorward at `h=0` to
+///     poleward at `h=1` via the `(2h−1)` factor. Being antisymmetric about mid-column its vertical
+///     integral is ~zero, so the imposed overturning conserves mass and adjacent-height branches
+///     automatically oppose — closing the cells at every layer for any depth. (This is the vertical
+///     derivative of a linear overturning streamfunction.)
+///
+/// Reduces exactly to the old two-layer belts at `h ∈ {0, 1}`.
+fn belt_for_layer(h: f32, n: Vec3, east: Vec3, north: Vec3, climate: &Climate, gradient: f32) -> Vec3 {
+    let lat = n.z.clamp(-1.0, 1.0).asin();
+    let shape = (6.0 * lat.abs()).sin();
+    // Zonal: surface tri-cell (h=0) → subtropical jet (h=1).
+    let zonal_surface = -climate.trade_wind_speed * shape;
+    let d = (lat.abs() - JET_LAT) / JET_WIDTH;
+    let zonal_jet = climate.jet_wind_speed * (-d * d).exp();
+    let zonal = zonal_surface * (1.0 - h) + zonal_jet * h;
+    // Meridional overturning: equatorward (−) at the surface, poleward (+) aloft, linear in height.
+    let poleward = climate.meridional_wind_speed * shape * lat.signum() * (2.0 * h - 1.0);
+    (east * zonal + north * poleward) * gradient
+}
+
+/// The surface tri-cell belt (the `h=0` end of [`belt_for_layer`]). Used by the belt-shape tests.
+#[cfg(test)]
+fn belt_wind(n: Vec3, east: Vec3, north: Vec3, climate: &Climate, gradient: f32) -> Vec3 {
+    belt_for_layer(0.0, n, east, north, climate, gradient)
+}
+
+/// The upper-troposphere belt — subtropical jet + overturning return branch (the `h=1` end of
+/// [`belt_for_layer`]). Used by the belt-shape tests.
+#[cfg(test)]
+fn belt_wind_upper(n: Vec3, east: Vec3, north: Vec3, climate: &Climate, gradient: f32) -> Vec3 {
+    belt_for_layer(1.0, n, east, north, climate, gradient)
 }
 
 /// The wind perturbation from the local temperature gradient, via a steady Ekman balance of three
@@ -237,20 +224,22 @@ fn geostrophic_wind(n: Vec3, grad_t: Vec3, climate: &Climate) -> Vec3 {
 /// prognostic field with a sensible starting state (see [`step`]); the live wind is then evolved by
 /// integrating momentum. `grad_t` is the temperature gradient (from [`gradients`]) and `gradient`
 /// the climate factor (from [`gradient_factor`]). Each entry is a tangent vector in m·s⁻¹. `layer`
-/// selects the belt target (surface tri-cell vs upper jet/return); `grad_t` is the matching layer's
-/// temperature gradient (`∇T_s` for the surface, `∇T_a` for the upper layer).
+/// `layer`/`n_layers` place this wind at its normalized height (0 = surface … 1 = top), which
+/// selects its belt target; `grad_t` is the gradient driving its pressure force.
 pub fn compute(
     grid: &Grid,
     climate: &Climate,
     gradient: f32,
     grad_t: &[Vec3],
     out: &mut [Vec3],
-    layer: WindLayer,
+    layer: usize,
+    n_layers: usize,
 ) {
+    let h = layer_height(layer, n_layers);
     out.par_iter_mut().enumerate().for_each(|(i, w)| {
         let n = grid.centers[i];
         let (east, north) = east_north(n);
-        let belt = belt_for(layer, n, east, north, climate, gradient);
+        let belt = belt_for_layer(h, n, east, north, climate, gradient);
         let geo = geostrophic_wind(n, grad_t[i], climate);
         let v = belt + geo;
         // Re-project to the tangent plane to kill any tiny normal component from summation.
@@ -335,18 +324,21 @@ pub fn step(
     dt: f32,
     u: &[Vec3],
     out: &mut [Vec3],
-    layer: WindLayer,
+    layer: usize,
+    n_layers: usize,
     couple_to: Option<&[Vec3]>,
 ) {
     let radius = climate.planet_radius;
     let coupling = climate.vertical_wind_coupling;
     let omega = std::f32::consts::TAU / climate.day_seconds;
     let zonal_relax = climate.wind_relax;
-    // The upper layer feels little surface drag, so its jet can run fast; the surface layer keeps
-    // its full Rayleigh friction (eddy dissipation + equatorial bound).
-    let friction = match layer {
-        WindLayer::Surface => climate.wind_friction,
-        WindLayer::Upper => climate.wind_friction_upper,
+    let h = layer_height(layer, n_layers);
+    // The surface layer keeps its full Rayleigh friction (eddy dissipation + equatorial bound); the
+    // free-tropospheric layers aloft feel little surface drag, so their jet can run fast.
+    let friction = if layer == 0 {
+        climate.wind_friction
+    } else {
+        climate.wind_friction_upper
     };
     let visc = climate.wind_viscosity;
     let k = climate.geostrophic_coeff;
@@ -357,7 +349,7 @@ pub fn step(
         let n = grid.centers[i];
         let ui = u[i];
         let (east, north) = east_north(n);
-        let belt = belt_for(layer, n, east, north, climate, gradient);
+        let belt = belt_for_layer(h, n, east, north, climate, gradient);
         let b = band_of(n);
 
         // Nonlinear self-advection in conservative flux form −∇·(u u), with antisymmetric, upwinded
@@ -532,7 +524,7 @@ mod tests {
         let grad = gradients(&g, &temp, R);
         let gfac = gradient_factor(&g, &temp);
         let mut wind = vec![Vec3::ZERO; g.n];
-        compute(&g, &climate, gfac, &grad, &mut wind, WindLayer::Surface);
+        compute(&g, &climate, gfac, &grad, &mut wind, 0, 2);
         for i in 0..g.n {
             assert!(wind[i].dot(g.centers[i]).abs() < 1e-3, "wind not tangent at {i}");
             assert!(wind[i].is_finite(), "non-finite wind at {i}");
@@ -576,7 +568,7 @@ mod tests {
         let grad = gradients(&g, &temp, R);
         let gfac = gradient_factor(&g, &temp);
         let mut wind = vec![Vec3::ZERO; g.n];
-        compute(&g, &climate, gfac, &grad, &mut wind, WindLayer::Surface);
+        compute(&g, &climate, gfac, &grad, &mut wind, 0, 2);
         for w in &wind {
             assert!(w.length() < 1e-3, "uniform climate should be calm, got {}", w.length());
         }

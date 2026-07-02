@@ -97,33 +97,42 @@ pub struct Climate {
     /// is what carries heat poleward and warms the poles. Same units as `diffusivity`.
     pub eddy_diffusivity: f32,
 
-    // --- Atmosphere (TWO grey-radiation layers — lower + upper — + a convection chain) ---
-    /// IR emissivity/absorptivity ε_L (0..1) of the **lower** atmosphere layer: the fraction of the
-    /// longwave beam it absorbs (= the fraction it emits, by Kirchhoff). The two layers together set
-    /// the greenhouse strength and, because the upper layer is colder, an emergent vertical
-    /// temperature structure.
-    pub atm_emissivity_lower: f32,
-    /// IR emissivity/absorptivity ε_U (0..1) of the **upper** atmosphere layer. Smaller than the
-    /// lower (less mass/absorber aloft), so the upper layer is optically thinner.
-    pub atm_emissivity_upper: f32,
-    /// Areal heat capacity C_L (J·m⁻²·K⁻¹) of the lower layer — its share of the column thermal mass.
-    pub atm_heat_capacity_lower: f32,
-    /// Areal heat capacity C_U (J·m⁻²·K⁻¹) of the upper layer. `C_L + C_U` ≈ the old single-slab
-    /// column mass (~1e7).
-    pub atm_heat_capacity_upper: f32,
-    /// Convective (sensible-heat) exchange coefficient (W·m⁻²·K⁻¹): the upward heat flux per degree
-    /// of super-threshold warmth across a convective link. Used for both links of the chain
-    /// (surface→lower and lower→upper) — hot air carries heat up the column instead of the surface
-    /// running away.
+    // --- Atmosphere (a column of `n_layers` grey-radiation layers + a convection chain) ---
+    /// Number of atmosphere layers stacked above the surface (≥1; capped at [`MAX_LAYERS`]). The
+    /// column's per-layer emissivity, heat capacity and lapse are generated from the *totals* below,
+    /// so refining the column (more layers) keeps the surface climate ~invariant — it just resolves
+    /// the vertical structure more finely. Fixed at [`Sim::new`]; changing it needs a fresh `Sim`.
+    pub n_layers: usize,
+    /// Total column IR emissivity `Σ ε_l` — the greenhouse strength. Split across the layers by
+    /// [`atm_emissivity_decay`]; holding the sum fixed keeps the greenhouse ~independent of `n_layers`.
+    pub atm_emissivity_total: f32,
+    /// Geometric ratio `ε_{l+1}/ε_l` (<1) of per-layer emissivity with height: less absorber aloft,
+    /// so upper layers are optically thinner. At `n_layers = 2` with the default total this yields
+    /// the old hand-tuned (0.72, 0.50).
+    pub atm_emissivity_decay: f32,
+    /// Total column areal heat capacity `Σ C_l` (J·m⁻²·K⁻¹) — the column thermal mass, split across
+    /// the layers by [`atm_heat_capacity_decay`].
+    pub atm_heat_capacity_total: f32,
+    /// Geometric ratio `C_{l+1}/C_l` (<1) of per-layer heat capacity with height (more mass low). At
+    /// `n_layers = 2` with the default total this yields the old (6e6, 4e6).
+    pub atm_heat_capacity_decay: f32,
+    /// Convective (sensible-heat) exchange coefficient (W·m⁻²·K⁻¹) of the **bottom** link
+    /// (surface→layer-0, the boundary layer): the upward heat flux per degree of super-threshold
+    /// warmth. Hot air carries heat up the column instead of the surface running away.
     pub convection_coeff: f32,
-    /// Convective lapse threshold Γ (K) *per link*: a link fires only when the lower body is warmer
-    /// than the upper by more than Γ, so each layer settles ~Γ below the one beneath it (surface →
-    /// lower → upper). This keeps each layer colder than the one below — which is what makes the
-    /// greenhouse work — and builds the vertical lapse. Applied to both links of the chain.
-    pub convection_threshold: f32,
-    /// Ablation switch (diagnostics): when false, the upper layer `T_u` is not advected by the upper
-    /// wind. Always true in production; lets a diagnostic isolate the upper-advection channel.
-    pub upper_advection: bool,
+    /// Geometric decay (≤1) of the convective coefficient per link with height. `1.0` couples the
+    /// whole column as tightly as the boundary layer (the old uniform behavior); `<1` loosens the
+    /// free troposphere so upper layers keep a warm anomaly long enough to travel with the wind —
+    /// the key knob for emergent heatwaves — while the boundary-layer link stays strong.
+    pub convection_decay: f32,
+    /// Total convective lapse (K) from the surface to the top layer. The per-link threshold Γ is this
+    /// divided by the number of links (`n_layers`), so a link fires only when the body below is
+    /// warmer than the one above by more than Γ. Holding the *total* fixed keeps the overall vertical
+    /// structure ~independent of `n_layers` (each link just spans a smaller slice).
+    pub convection_lapse: f32,
+    /// Ablation switch (diagnostics): when false, the air layers are not advected by their winds.
+    /// Always true in production; lets a diagnostic isolate the advection channel.
+    pub atm_advection: bool,
     /// Lateral heat conductance within the atmosphere (same units as `diffusivity`); the atmosphere
     /// mixes heat horizontally more freely than the surface.
     pub atm_diffusivity: f32,
@@ -194,29 +203,39 @@ impl Default for Climate {
             // transport — damp the upper eddies via `wind_friction_upper` instead.
             eddy_diffusivity: 150.0,
 
-            // Per-layer greenhouse strength. Two stacked grey layers give a stronger total
-            // greenhouse than one, so each emissivity is below the old single-slab 0.90; the upper
-            // layer is optically thinner than the lower. Tuned (with the heat capacities + lapse) to
-            // keep the surface mean near Earth's and a realistic lapse (lower ~255 K, upper ~225 K).
-            atm_emissivity_lower: 0.72,
-            atm_emissivity_upper: 0.50,
-            // Column thermal mass split between the layers (sum ≈ the old 1e7 single slab); the lower
-            // troposphere holds a bit more mass than the upper.
-            atm_heat_capacity_lower: 6.0e6,
-            atm_heat_capacity_upper: 4.0e6,
-            // Sensible-heat exchange coefficient (W·m⁻²·K⁻¹) for each convective link of the chain.
+            // A three-layer troposphere: enough vertical resolution for a lower free-tropospheric
+            // layer (where weather/heat anomalies can travel with the low-level flow) distinct from
+            // the surface-coupled boundary layer and the jet aloft.
+            n_layers: 3,
+            // Total column greenhouse strength `Σ ε_l`, and its geometric decay with height. At
+            // n_layers = 2 these reproduce the old hand-tuned (0.72, 0.50); the totals-based form
+            // keeps the greenhouse ~constant as the column is refined (Earth-like surface mean).
+            atm_emissivity_total: 1.22,
+            atm_emissivity_decay: 0.694,
+            // Total column thermal mass (≈ the old 1e7 single slab) and its decay with height (more
+            // mass low). At n_layers = 2 these reproduce the old (6e6, 4e6).
+            atm_heat_capacity_total: 1.0e7,
+            atm_heat_capacity_decay: 0.667,
+            // Sensible-heat exchange coefficient (W·m⁻²·K⁻¹) of the boundary-layer link. Higher links
+            // decay from this by `convection_decay` (set below).
             convection_coeff: 35.0,
-            // Per-link lapse threshold (K): each layer settles ~33 K below the one beneath it, so the
-            // chain builds surface → lower (−33) → upper (−66) — a realistic tropospheric profile —
-            // while preserving the greenhouse.
-            convection_threshold: 33.0,
-            // The atmosphere mixes heat laterally more freely than the surface (both layers). This
-            // also *stabilizes* the layers' advective central-difference form (the upper wind is fast
-            // and divergent), so it must stay at this magnitude — cutting it to offset transport
-            // sends the advection checkerboard-unstable.
-            atm_diffusivity: 60.0,
-            // Production: the upper layer is advected. (Ablation switch for diagnostics only.)
-            upper_advection: true,
+            // Loosen the free troposphere aloft (tuned against `heatwave_diagnostics`): the upper
+            // links are ~10× weaker than the boundary layer, so a free-tropospheric warm anomaly is
+            // only radiatively/loosely coupled and keeps a multi-day memory instead of being pinned
+            // to the surface in ~1 day. The boundary-layer link (0) stays at the full coefficient.
+            convection_decay: 0.1,
+            // Total surface→top lapse (K): split over the links (Γ = 66/n_layers per link), it builds
+            // a realistic tropospheric profile while preserving the greenhouse. At n_layers = 2 this
+            // is the old 33 K per link (surface → lower −33 → upper −66).
+            convection_lapse: 66.0,
+            // Lateral atmospheric mixing. Lowered from the old 60 (tuned against `heatwave_diagnostics`):
+            // strong lateral diffusion was smearing warm anomalies away in ~1 day, so a much weaker
+            // value lets them persist and travel. It still provides the numerical dissipation that keeps
+            // the layers' advective central-difference form stable (verified at the production grid);
+            // do not push it near zero without switching temperature advection to an upwind scheme.
+            atm_diffusivity: 15.0,
+            // Production: the air layers are advected. (Ablation switch for diagnostics only.)
+            atm_advection: true,
         }
     }
 }
@@ -224,6 +243,27 @@ impl Default for Climate {
 /// Lowest temperature a cell is allowed to reach (cosmic microwave background), keeping the
 /// T⁴ term well-behaved through long nights.
 const TEMP_FLOOR: f32 = 2.7;
+
+/// Hard cap on the number of atmosphere layers. Bounds the fixed-size scratch arrays in the
+/// radiation sweep so the hot loop needs no per-cell allocation.
+pub(crate) const MAX_LAYERS: usize = 16;
+
+/// Split a column `total` across `n` layers by a geometric profile with ratio `decay` (layer 0 the
+/// largest), normalized so the per-layer values sum to `total`. Used to distribute the column
+/// emissivity and heat capacity so the *totals* — hence the surface climate — stay ~invariant as the
+/// column is refined into more layers.
+fn geometric_profile(total: f32, decay: f32, n: usize) -> Vec<f32> {
+    let mut weights = Vec::with_capacity(n);
+    let mut w = 1.0f32;
+    let mut sum = 0.0f32;
+    for _ in 0..n {
+        weights.push(w);
+        sum += w;
+        w *= decay;
+    }
+    let scale = if sum > 0.0 { total / sum } else { 0.0 };
+    weights.iter().map(|w| w * scale).collect()
+}
 
 /// Largest internal integration step (sim seconds). The engine sub-steps to this bound so the
 /// explicit Euler update stays stable regardless of the wall-clock frame time. Chosen to keep the
@@ -251,34 +291,28 @@ pub struct Sim {
     /// all-land before terrain is generated. Its ocean/land contrast is what damps the seasonal
     /// (and diurnal) swing realistically.
     heat_cap: Vec<f32>,
-    /// Current per-cell **lower** atmosphere-layer temperatures (K).
-    temp_l: Vec<f32>,
-    /// Scratch buffer for the double-buffered lower-atmosphere update.
-    temp_l_scratch: Vec<f32>,
-    /// Current per-cell **upper** atmosphere-layer temperatures (K).
-    temp_u: Vec<f32>,
-    /// Scratch buffer for the double-buffered upper-atmosphere update.
-    temp_u_scratch: Vec<f32>,
-    /// Current per-cell surface wind (tangent to the sphere, m·s⁻¹). Prognostic: integrated from the
-    /// momentum balance each step. Seeded from the diagnostic balance on the first [`Sim::advance`].
-    /// Represents the lower-tropospheric flow — it advects both `T_s` and the lower layer `T_l`.
-    wind: Vec<Vec3>,
-    /// Scratch buffer for the double-buffered wind update.
-    wind_scratch: Vec<Vec3>,
-    /// Current per-cell **upper**-layer wind (tangent, m·s⁻¹): the subtropical jet + overturning
-    /// return branch aloft. Prognostic like [`wind`]; advects the upper layer temperature `T_u`.
-    wind_hi: Vec<Vec3>,
-    /// Scratch buffer for the double-buffered upper-wind update.
-    wind_hi_scratch: Vec<Vec3>,
-    /// Current per-cell surface temperature gradient (tangent, K·m⁻¹), recomputed each step and
-    /// shared by the surface wind's pressure-gradient force.
-    grad: Vec<Vec3>,
-    /// Current per-cell lower-atmosphere temperature gradient (tangent, K·m⁻¹); advects `T_l`.
-    grad_l: Vec<Vec3>,
-    /// Current per-cell upper-atmosphere temperature gradient (tangent, K·m⁻¹), driving the upper
-    /// wind's pressure force and advecting `T_u`.
-    grad_u: Vec<Vec3>,
-    /// Current per-cell surface→lower convective (sensible-heat) flux H (W·m⁻²) — the upward venting
+    /// Number of atmosphere layers (fixed from `climate.n_layers` at construction). Sizes every
+    /// per-layer buffer below.
+    n_layers: usize,
+    /// Current per-cell atmosphere-layer temperatures (K), one contiguous field per layer, index 0 =
+    /// lowest/warmest … `n_layers−1` = top/coldest.
+    atm: Vec<Vec<f32>>,
+    /// Scratch buffers for the double-buffered atmosphere update (one per layer).
+    atm_scratch: Vec<Vec<f32>>,
+    /// Current per-cell wind for each layer (tangent to the sphere, m·s⁻¹). Prognostic: integrated
+    /// from the momentum balance each step, seeded from the diagnostic balance on the first
+    /// [`Sim::advance`]. Layer 0 is the near-surface flow (advects air layer 0 and is the displayed
+    /// "surface wind"); higher layers carry the jet and the overturning's return branches.
+    wind_layers: Vec<Vec<Vec3>>,
+    /// Scratch buffers for the double-buffered wind update (one per layer).
+    wind_scratch: Vec<Vec<Vec3>>,
+    /// Current per-cell surface temperature gradient (tangent, K·m⁻¹), recomputed each step; drives
+    /// the layer-0 wind's pressure-gradient force (surface pressure ~ surface temperature).
+    grad_s: Vec<Vec3>,
+    /// Current per-cell temperature gradient of each atmosphere layer (tangent, K·m⁻¹). `grads[l]`
+    /// advects air layer `l`, and (for `l ≥ 1`) drives that layer's wind's pressure force.
+    grads: Vec<Vec<Vec3>>,
+    /// Current per-cell surface→layer-0 convective (sensible-heat) flux H (W·m⁻²) — the upward venting
     /// off the surface, written each step. Diagnostic only (not fed back); the ITCZ/convection signal.
     conv: Vec<f32>,
     /// Whether the prognostic winds have been seeded from the diagnostic balance yet.
@@ -289,6 +323,17 @@ impl Sim {
     /// Create a simulation with all cells at a uniform starting temperature. The terrain starts
     /// empty; call [`Sim::generate_terrain`] (which needs the grid) to populate it.
     pub fn new(n: usize, climate: Climate, initial_temp: f32) -> Self {
+        let layers = climate.n_layers.max(1);
+        assert!(
+            layers <= MAX_LAYERS,
+            "n_layers {layers} exceeds MAX_LAYERS {MAX_LAYERS}",
+        );
+        // Each atmosphere layer starts one per-link lapse cooler than the one below it — the chain's
+        // equilibrium ordering (surface warmest, top coldest).
+        let gamma = climate.convection_lapse / layers as f32;
+        let atm: Vec<Vec<f32>> = (0..layers)
+            .map(|l| vec![initial_temp - (l as f32 + 1.0) * gamma; n])
+            .collect();
         Self {
             climate,
             time: 0.0,
@@ -298,19 +343,13 @@ impl Sim {
             scratch: vec![initial_temp; n],
             // No terrain yet → treat the whole surface as land; recomputed in `generate_terrain`.
             heat_cap: vec![climate.heat_capacity; n],
-            // Each atmosphere layer starts cooler than the one below (it sits above it): the lower
-            // layer ~Γ below the surface, the upper ~2Γ, the chain's equilibrium ordering.
-            temp_l: vec![initial_temp - 33.0; n],
-            temp_l_scratch: vec![initial_temp - 33.0; n],
-            temp_u: vec![initial_temp - 66.0; n],
-            temp_u_scratch: vec![initial_temp - 66.0; n],
-            wind: vec![Vec3::ZERO; n],
-            wind_scratch: vec![Vec3::ZERO; n],
-            wind_hi: vec![Vec3::ZERO; n],
-            wind_hi_scratch: vec![Vec3::ZERO; n],
-            grad: vec![Vec3::ZERO; n],
-            grad_l: vec![Vec3::ZERO; n],
-            grad_u: vec![Vec3::ZERO; n],
+            n_layers: layers,
+            atm_scratch: atm.clone(),
+            atm,
+            wind_layers: vec![vec![Vec3::ZERO; n]; layers],
+            wind_scratch: vec![vec![Vec3::ZERO; n]; layers],
+            grad_s: vec![Vec3::ZERO; n],
+            grads: vec![vec![Vec3::ZERO; n]; layers],
             conv: vec![0.0; n],
             wind_seeded: false,
         }
@@ -340,14 +379,24 @@ impl Sim {
         &self.temp
     }
 
-    /// Current per-cell lower-atmosphere-layer temperatures (K).
-    pub fn lower_atmosphere_temperatures(&self) -> &[f32] {
-        &self.temp_l
+    /// Number of atmosphere layers.
+    pub fn n_layers(&self) -> usize {
+        self.n_layers
     }
 
-    /// Current per-cell upper-atmosphere-layer temperatures (K).
+    /// Current per-cell temperatures (K) of atmosphere `layer` (0 = lowest … `n_layers−1` = top).
+    pub fn atmosphere_temperatures(&self, layer: usize) -> &[f32] {
+        &self.atm[layer]
+    }
+
+    /// Current per-cell temperatures (K) of the **lowest** atmosphere layer.
+    pub fn lower_atmosphere_temperatures(&self) -> &[f32] {
+        &self.atm[0]
+    }
+
+    /// Current per-cell temperatures (K) of the **top** atmosphere layer.
     pub fn upper_atmosphere_temperatures(&self) -> &[f32] {
-        &self.temp_u
+        &self.atm[self.n_layers - 1]
     }
 
     /// Per-cell surface elevation (m relative to sea level; negative = ocean floor).
@@ -355,16 +404,22 @@ impl Sim {
         &self.crust.elevation
     }
 
-    /// Current per-cell surface wind (tangent to the sphere, m·s⁻¹). All zero until the first
-    /// [`Sim::advance`] has run.
-    pub fn winds(&self) -> &[Vec3] {
-        &self.wind
+    /// Current per-cell wind (tangent to the sphere, m·s⁻¹) of atmosphere `layer`. All zero until the
+    /// first [`Sim::advance`] has run.
+    pub fn layer_winds(&self, layer: usize) -> &[Vec3] {
+        &self.wind_layers[layer]
     }
 
-    /// Current per-cell upper-layer wind (tangent, m·s⁻¹): the subtropical jet + overturning return
+    /// Current per-cell **surface** (lowest-layer) wind (tangent, m·s⁻¹). All zero until the first
+    /// [`Sim::advance`] has run.
+    pub fn winds(&self) -> &[Vec3] {
+        &self.wind_layers[0]
+    }
+
+    /// Current per-cell **top**-layer wind (tangent, m·s⁻¹): the subtropical jet + overturning return
     /// branch aloft. All zero until the first [`Sim::advance`] has run.
     pub fn winds_hi(&self) -> &[Vec3] {
-        &self.wind_hi
+        &self.wind_layers[self.n_layers - 1]
     }
 
     /// Current per-cell convective heat flux H (W·m⁻²) — the upward venting into the atmosphere.
@@ -395,69 +450,82 @@ impl Sim {
             let dt = remaining.min(MAX_SUBSTEP);
             let sun = self.sun_direction(self.time);
 
-            // The single equator-to-pole gradient factor scales both the belts and the storm-track
-            // eddy diffusivity; compute it (and the temperature gradient that drives the wind's
-            // pressure force) once and share.
-            let gradient = wind::gradient_factor(grid, &self.temp);
-            // Three gradients: ∇T_s drives the surface wind (and advects T_s), ∇T_l advects the
-            // lower layer (carried by the surface wind), ∇T_u drives the upper wind (and advects T_u).
             let radius = self.climate.planet_radius;
-            self.grad = wind::gradients(grid, &self.temp, radius);
-            self.grad_l = wind::gradients(grid, &self.temp_l, radius);
-            self.grad_u = wind::gradients(grid, &self.temp_u, radius);
+            let n = self.n_layers;
 
-            // Seed both prognostic winds from the diagnostic balance the first time, so they start
-            // in a sensible state rather than from rest.
+            // Per-layer emissivity and heat capacity from the column totals (cheap; the column is
+            // shallow). Generating from totals keeps the greenhouse and thermal mass — hence the
+            // surface climate — ~invariant as `n_layers` changes.
+            let emis = geometric_profile(
+                self.climate.atm_emissivity_total,
+                self.climate.atm_emissivity_decay,
+                n,
+            );
+            let heat_cap_atm = geometric_profile(
+                self.climate.atm_heat_capacity_total,
+                self.climate.atm_heat_capacity_decay,
+                n,
+            );
+
+            // The single equator-to-pole gradient factor scales both the belts and the storm-track
+            // eddy diffusivity; compute it once and share. Then a temperature gradient per field:
+            // ∇T_s drives the layer-0 wind, and each air layer's ∇T advects it (and drives its wind
+            // aloft).
+            let gradient = wind::gradient_factor(grid, &self.temp);
+            self.grad_s = wind::gradients(grid, &self.temp, radius);
+            for l in 0..n {
+                self.grads[l] = wind::gradients(grid, &self.atm[l], radius);
+            }
+
+            // Seed the prognostic winds from the diagnostic balance the first time, so they start in
+            // a sensible state rather than from rest.
             if !self.wind_seeded {
-                wind::compute(grid, &self.climate, gradient, &self.grad, &mut self.wind, wind::WindLayer::Surface);
-                wind::compute(grid, &self.climate, gradient, &self.grad_u, &mut self.wind_hi, wind::WindLayer::Upper);
+                for l in 0..n {
+                    let drive = if l == 0 { &self.grad_s } else { &self.grads[l] };
+                    wind::compute(grid, &self.climate, gradient, drive, &mut self.wind_layers[l], l, n);
+                }
                 self.wind_seeded = true;
             }
 
-            // Integrate both wind layers one step (momentum balance: advection + Coriolis + pressure
-            // + belt relaxation + viscosity), then swap them in. The surface relaxes to the tri-cell
-            // belts and is driven by ∇T_s; the upper layer relaxes to the jet/return target and is
-            // driven by the upper-layer ∇T_u.
-            wind::step(
-                grid,
-                &self.climate,
-                gradient,
-                &self.grad,
-                dt,
-                &self.wind,
-                &mut self.wind_scratch,
-                wind::WindLayer::Surface,
-                None,
-            );
-            std::mem::swap(&mut self.wind, &mut self.wind_scratch);
-            // The upper wind is vertically coupled to the (now-updated) surface wind, inheriting its
-            // turbulence so the jet is lively.
-            wind::step(
-                grid,
-                &self.climate,
-                gradient,
-                &self.grad_u,
-                dt,
-                &self.wind_hi,
-                &mut self.wind_hi_scratch,
-                wind::WindLayer::Upper,
-                Some(&self.wind),
-            );
-            std::mem::swap(&mut self.wind_hi, &mut self.wind_hi_scratch);
-
-            // Area-mean of the upper-layer advective tendency −u_hi·∇T_u. The upper wind is fast and
-            // divergent, so this mean is nonzero and would otherwise drift the global upper-layer
-            // temperature (and with it the greenhouse); subtract it in the kernel so advection only
-            // redistributes heat — the single-layer stand-in for the vertical mass compensation that
-            // makes the continuum horizontal advection conserve energy. (The lower layer rides the
-            // slower surface wind, so like `T_s` it tolerates the small uncorrected leak.)
-            let (mut adv_num, mut adv_den) = (0.0f64, 0.0f64);
-            for i in 0..grid.n {
-                let a = grid.areas[i] as f64;
-                adv_num += (-self.wind_hi[i].dot(self.grad_u[i])) as f64 * a;
-                adv_den += a;
+            // Integrate each wind layer one step (momentum balance: advection + Coriolis + pressure +
+            // belt relaxation + viscosity), bottom-up so each layer couples vertically to the
+            // already-updated layer below it — inheriting the turbulent surface variability aloft, so
+            // the jet stays lively. Layer 0's pressure force is driven by ∇T_s; layers aloft by their
+            // own ∇T.
+            for l in 0..n {
+                let drive = if l == 0 { &self.grad_s } else { &self.grads[l] };
+                let couple = if l == 0 { None } else { Some(&self.wind_layers[l - 1][..]) };
+                wind::step(
+                    grid,
+                    &self.climate,
+                    gradient,
+                    drive,
+                    dt,
+                    &self.wind_layers[l],
+                    &mut self.wind_scratch[l],
+                    l,
+                    n,
+                    couple,
+                );
+                std::mem::swap(&mut self.wind_layers[l], &mut self.wind_scratch[l]);
             }
-            let adv_u_correction = (adv_num / adv_den) as f32;
+
+            // Area-mean of each layer's advective tendency −u·∇T, subtracted in the kernel so
+            // advection only redistributes heat within the layer — the stand-in for the vertical mass
+            // compensation that makes continuum horizontal advection conserve energy (the imposed
+            // winds are divergent, so without it a fast layer's global mean would drift).
+            let mut adv_corr = vec![0.0f32; n];
+            if self.climate.atm_advection {
+                for l in 0..n {
+                    let (mut num, mut den) = (0.0f64, 0.0f64);
+                    for i in 0..grid.n {
+                        let a = grid.areas[i] as f64;
+                        num += (-self.wind_layers[l][i].dot(self.grads[l][i])) as f64 * a;
+                        den += a;
+                    }
+                    adv_corr[l] = (num / den) as f32;
+                }
+            }
 
             temperature::step(
                 grid,
@@ -466,27 +534,21 @@ impl Sim {
                 dt,
                 TEMP_FLOOR,
                 gradient,
-                temperature::Temps {
-                    s: &self.temp,
-                    l: &self.temp_l,
-                    u: &self.temp_u,
-                },
+                n,
+                &self.temp,
+                &self.atm,
+                &emis,
+                &heat_cap_atm,
                 &self.heat_cap,
-                &self.wind,
-                &self.grad_l,
-                &self.wind_hi,
-                &self.grad_u,
-                adv_u_correction,
-                temperature::Outs {
-                    s: &mut self.scratch,
-                    l: &mut self.temp_l_scratch,
-                    u: &mut self.temp_u_scratch,
-                    conv: &mut self.conv,
-                },
+                &self.wind_layers,
+                &self.grads,
+                &adv_corr,
+                &mut self.scratch,
+                &mut self.atm_scratch,
+                &mut self.conv,
             );
             std::mem::swap(&mut self.temp, &mut self.scratch);
-            std::mem::swap(&mut self.temp_l, &mut self.temp_l_scratch);
-            std::mem::swap(&mut self.temp_u, &mut self.temp_u_scratch);
+            std::mem::swap(&mut self.atm, &mut self.atm_scratch);
             self.time += dt as f64;
             remaining -= dt;
         }
@@ -522,10 +584,9 @@ mod tests {
         climate.trade_wind_speed = 0.0;
         climate.meridional_wind_speed = 0.0;
         climate.geostrophic_coeff = 0.0;
-        // Disable the atmosphere too (both grey layers + convection) so the surface reaches the
+        // Disable the atmosphere too (all grey layers + convection) so the surface reaches the
         // bare σT⁴ = absorbed equilibrium this test checks.
-        climate.atm_emissivity_lower = 0.0;
-        climate.atm_emissivity_upper = 0.0;
+        climate.atm_emissivity_total = 0.0;
         climate.convection_coeff = 0.0;
         climate.day_seconds = 1.0e12; // effectively frozen sun
         climate.year_seconds = 1.0e15;
@@ -581,6 +642,182 @@ mod tests {
         for &t in sim.temperatures() {
             assert!(t.is_finite(), "temperature went non-finite");
             assert!((TEMP_FLOOR..600.0).contains(&t), "temperature out of range: {t}");
+        }
+    }
+
+    /// The column profiles reduce to the old hand-tuned two-layer values, and always sum to the
+    /// column total (the invariant that keeps the climate steady as the column is refined).
+    #[test]
+    fn geometric_profile_reduces_to_old_two_layer_values() {
+        let e = geometric_profile(1.22, 0.694, 2);
+        assert!((e[0] - 0.72).abs() < 0.01 && (e[1] - 0.50).abs() < 0.01, "emissivity {e:?}");
+        let c = geometric_profile(1.0e7, 0.667, 2);
+        assert!((c[0] - 6.0e6).abs() < 5e4 && (c[1] - 4.0e6).abs() < 5e4, "heat cap {c:?}");
+        // The sum is preserved for any layer count.
+        for n in 1..=8 {
+            let p = geometric_profile(1.22, 0.7, n);
+            assert!((p.iter().sum::<f32>() - 1.22).abs() < 1e-4, "n={n} sum {:?}", p);
+        }
+    }
+
+    /// Global-mean run helper: advance an `layers`-deep column for `days` and return the mean
+    /// surface temperature. No terrain (uniform fast land heat capacity) so it settles quickly.
+    fn mean_surface_temp(layers: usize, days: f32, steps: usize) -> f32 {
+        let g = Grid::new(400);
+        let mut climate = Climate::default();
+        climate.n_layers = layers;
+        let mut sim = Sim::new(g.n, climate, 260.0);
+        let total = climate.day_seconds * days;
+        for _ in 0..steps {
+            sim.advance(&g, total / steps as f32);
+        }
+        sim.temperatures().iter().sum::<f32>() / g.n as f32
+    }
+
+    /// Because the per-layer emissivity/heat-capacity/lapse are generated from column *totals*, the
+    /// global-mean surface climate is nearly independent of how many layers the column is split into
+    /// — refining the column adds vertical detail without moving the surface temperature.
+    #[test]
+    fn surface_climate_is_roughly_layer_count_invariant() {
+        let t2 = mean_surface_temp(2, 10.0, 130);
+        let t4 = mean_surface_temp(4, 10.0, 130);
+        assert!((t2 - t4).abs() < 12.0, "N=2 {t2:.1}K vs N=4 {t4:.1}K differ too much");
+        for (n, t) in [(2, t2), (4, t4)] {
+            assert!((250.0..320.0).contains(&t), "N={n} surface mean {t:.1}K implausible");
+        }
+    }
+
+    /// The grey column + convective chain build a monotonic lapse: in the global mean the surface is
+    /// warmest and each layer is colder than the one below it (the greenhouse ordering), for the
+    /// default three-layer column.
+    #[test]
+    fn column_builds_a_monotonic_lapse() {
+        let g = Grid::new(1200);
+        let climate = Climate::default();
+        let mut sim = Sim::new(g.n, climate, 260.0);
+        let day = climate.day_seconds;
+        for _ in 0..150 {
+            sim.advance(&g, day * 5.0 / 150.0);
+        }
+        let mean = |t: &[f32]| t.iter().sum::<f32>() / t.len() as f32;
+        let mut prev = mean(sim.temperatures());
+        for l in 0..sim.n_layers() {
+            let tl = mean(sim.atmosphere_temperatures(l));
+            assert!(tl < prev, "layer {l} mean {tl:.1}K not colder than the body below {prev:.1}K");
+            prev = tl;
+        }
+    }
+
+    /// Heatwave-tuning diagnostic (heavy — ignored). For each candidate coupling it reports the
+    /// mean-climate health (surface mean, equator-pole gradient, surface→top lapse) and a heatwave
+    /// **twin experiment**: two identical spun-up sims, a warm bump injected into the lowest
+    /// free-tropospheric layer of one, then the difference field tracked — its peak amplitude
+    /// (persistence) and centroid displacement (does it travel, and poleward?). Run with:
+    ///   cargo test --release heatwave_diagnostics -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn heatwave_diagnostics() {
+        use glam::Vec3;
+        // 6000 cells: a snappy on-demand grid. Bump to 16384 (the production grid) for a definitive
+        // stability check of the fast jet layer under low diffusion.
+        let g = Grid::new(6000);
+        let day = Climate::default().day_seconds;
+
+        // (label, convection_decay, atm_diffusivity) — lapse/emissivity kept at defaults.
+        let configs = [
+            ("baseline  d=1.00 atmD=60", 1.00f32, 60.0f32),
+            ("tuned     d=0.10 atmD=15", 0.10, 15.0),
+        ];
+
+        for (label, decay, atm_d) in configs {
+            let mut climate = Climate::default();
+            climate.convection_decay = decay;
+            climate.atm_diffusivity = atm_d;
+
+            // Two identical sims spun up together so their (deterministic) eddy fields match.
+            let mut ctrl = Sim::new(g.n, climate, 260.0);
+            let mut pert = Sim::new(g.n, climate, 260.0);
+            let (spin_days, spin_steps) = (4.0f32, 80);
+            for _ in 0..spin_steps {
+                let dt = day * spin_days / spin_steps as f32;
+                ctrl.advance(&g, dt);
+                pert.advance(&g, dt);
+            }
+
+            // Mean-climate health from the control.
+            let area: f64 = (0..g.n).map(|i| g.areas[i] as f64).sum();
+            let wmean = |f: &[f32]| {
+                ((0..g.n).map(|i| f[i] as f64 * g.areas[i] as f64).sum::<f64>() / area) as f32
+            };
+            let band = |f: &[f32], lo: f32, hi: f32| {
+                let (mut num, mut den) = (0.0f64, 0.0f64);
+                for i in 0..g.n {
+                    let lat = g.lonlat_deg[i].y.abs();
+                    if lat >= lo && lat < hi {
+                        num += f[i] as f64 * g.areas[i] as f64;
+                        den += g.areas[i] as f64;
+                    }
+                }
+                (num / den.max(1.0)) as f32
+            };
+            let mean_s = wmean(ctrl.temperatures());
+            let grad = band(ctrl.temperatures(), 0.0, 15.0) - band(ctrl.temperatures(), 75.0, 90.0);
+            let lapse_now = mean_s - wmean(ctrl.atmosphere_temperatures(ctrl.n_layers() - 1));
+
+            // Inject a warm bump into the lowest free-tropospheric layer at 45°N, 0°E.
+            let free_l = 1usize.min(ctrl.n_layers() - 1);
+            let lat0 = 45.0f32.to_radians();
+            let n0 = Vec3::new(lat0.cos(), 0.0, lat0.sin());
+            let (amp0, r) = (8.0f32, 0.16f32);
+            for i in 0..g.n {
+                let ang = g.centers[i].dot(n0).clamp(-1.0, 1.0).acos();
+                pert.atm[free_l][i] += amp0 * (-(ang / r) * (ang / r)).exp();
+            }
+
+            let smax = ctrl.temperatures().iter().cloned().fold(f32::MIN, f32::max);
+            let smin = ctrl.temperatures().iter().cloned().fold(f32::MAX, f32::min);
+            println!("\n=== {label} ===");
+            println!("  mean-climate: surface {mean_s:6.1}K   eq-pole grad {grad:5.1}K   surf-top lapse {lapse_now:5.1}K   surf-range [{smin:.0},{smax:.0}]K");
+            print!("  layer ranges (checkerboard check):");
+            for l in 0..ctrl.n_layers() {
+                let t = ctrl.atmosphere_temperatures(l);
+                let mx = t.iter().cloned().fold(f32::MIN, f32::max);
+                let mn = t.iter().cloned().fold(f32::MAX, f32::min);
+                print!("  L{l}[{mn:.0},{mx:.0}]");
+            }
+            println!();
+            println!("  heatwave (layer {free_l}):  day    amp(K)   travel(km)   centroid-lat");
+
+            let (run_days, run_steps, every) = (7.0f32, 140, 20);
+            let radius_km = climate.planet_radius / 1000.0;
+            for step in 0..=run_steps {
+                if step % every == 0 {
+                    let (mut amp, mut acc, mut wsum) = (0.0f32, Vec3::ZERO, 0.0f32);
+                    for i in 0..g.n {
+                        let d = pert.atm[free_l][i] - ctrl.atm[free_l][i];
+                        if d > amp {
+                            amp = d;
+                        }
+                        if d > 0.0 {
+                            acc += g.centers[i] * (d * g.areas[i]);
+                            wsum += d * g.areas[i];
+                        }
+                    }
+                    let (travel, clat) = if wsum > 0.0 {
+                        let c = (acc / wsum).normalize_or_zero();
+                        (c.dot(n0).clamp(-1.0, 1.0).acos() * radius_km, c.z.clamp(-1.0, 1.0).asin().to_degrees())
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let dday = step as f32 * run_days / run_steps as f32;
+                    println!("                          {dday:5.1}   {amp:6.2}   {travel:9.0}   {clat:9.1}");
+                }
+                if step < run_steps {
+                    let dt = day * run_days / run_steps as f32;
+                    ctrl.advance(&g, dt);
+                    pert.advance(&g, dt);
+                }
+            }
         }
     }
 }
